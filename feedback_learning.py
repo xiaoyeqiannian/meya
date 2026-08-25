@@ -70,8 +70,22 @@ def infer_replacements(
                     and 2 <= len(source) <= 32
                     and len(source.split()) <= 4
                 ):
-                    replacements.append((source, canonical))
-    return replacements
+                    replacement = (source, canonical)
+                    if replacement not in replacements:
+                        replacements.append(replacement)
+    # SequenceMatcher can split one human edit into adjacent replace/insert
+    # opcodes and yield overlapping sources. Keep the longest conservative
+    # source per canonical term so one correction creates one learned form.
+    best: dict[str, tuple[str, str]] = {}
+    order: list[str] = []
+    for source, canonical in replacements:
+        key = canonical.casefold()
+        if key not in best:
+            order.append(key)
+        previous = best.get(key)
+        if previous is None or len(source) > len(previous[0]):
+            best[key] = (source, canonical)
+    return [best[key] for key in order]
 
 
 def accepted_terms(text: str, entries: list[GlossaryEntry]) -> list[str]:

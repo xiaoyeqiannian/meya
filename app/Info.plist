@@ -23,7 +23,7 @@
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>57</string>
+	<string>58</string>
     <key>ComponentInputModeDict</key>
     <dict>
         <key>tsInputModeListKey</key>

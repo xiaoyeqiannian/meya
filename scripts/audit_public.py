@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 
 MAX_BLOB_BYTES = 5 * 1024 * 1024
@@ -51,34 +52,48 @@ def reachable_blobs() -> list[tuple[str, str]]:
     return sorted(blobs.items(), key=lambda item: item[1])
 
 
+def scan_data(path: str, data: bytes, findings: list[str]) -> None:
+    if len(data) > MAX_BLOB_BYTES or b"\0" in data[:8192]:
+        return
+    for label, pattern in PATTERNS.items():
+        if pattern.search(data):
+            findings.append(f"{path}: {label}")
+    if any(value in data for value in BANNED_LITERALS):
+        findings.append(f"{path}: known private marker")
+    for email in EMAIL.findall(data):
+        if not email.endswith(ALLOWED_EMAIL_SUFFIX):
+            findings.append(f"{path}: email address")
+            break
+
+
 def main() -> int:
     findings: list[str] = []
     for email in git("log", *PUBLIC_REVISIONS, "--format=%ae").splitlines():
         if email and not email.endswith(ALLOWED_EMAIL_SUFFIX):
             findings.append("commit metadata: non-noreply author email")
             break
-    for object_id, path in reachable_blobs():
+    blobs = reachable_blobs()
+    for object_id, path in blobs:
         size = int(git("cat-file", "-s", object_id))
         if size > MAX_BLOB_BYTES:
             continue
-        data = git("cat-file", "blob", object_id)
-        if b"\0" in data[:8192]:
+        scan_data(path, git("cat-file", "blob", object_id), findings)
+    for raw_path in git("ls-files", "-z").split(b"\0"):
+        if not raw_path:
             continue
-        for label, pattern in PATTERNS.items():
-            if pattern.search(data):
-                findings.append(f"{path}: {label}")
-        if any(value in data for value in BANNED_LITERALS):
-            findings.append(f"{path}: known private marker")
-        for email in EMAIL.findall(data):
-            if not email.endswith(ALLOWED_EMAIL_SUFFIX):
-                findings.append(f"{path}: email address")
-                break
+        path = raw_path.decode("utf-8", "surrogateescape")
+        try:
+            data = Path(path).read_bytes()
+        except OSError as error:
+            findings.append(f"{path}: cannot read tracked file ({error})")
+            continue
+        scan_data(path, data, findings)
     if findings:
         print("Privacy audit failed:", file=sys.stderr)
         for finding in sorted(set(findings)):
             print(f"- {finding}", file=sys.stderr)
         return 1
-    print(f"Privacy audit passed: {len(reachable_blobs())} reachable blobs scanned")
+    print(f"Privacy audit passed: {len(blobs)} reachable blobs and the tracked working tree scanned")
     return 0
 
 

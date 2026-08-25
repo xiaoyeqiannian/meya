@@ -78,12 +78,14 @@ chmod +x "$app_dir/Contents/Helpers/register-input-method"
 local_signing_keychain_v2="$HOME/Library/Keychains/MeyaSigningV2.keychain-db"
 legacy_signing_keychain="$HOME/Library/Keychains/MeyaLocalSigning.keychain-db"
 codesign_keychain=()
+certificate_keychain=()
 codesign_identity=""
 if [[ -f "$local_signing_keychain_v2" ]]; then
   security unlock-keychain -p '' "$local_signing_keychain_v2"
   codesign_identity="$(security find-identity -v -p codesigning "$local_signing_keychain_v2" | awk '/Meya Local Code Signing V2/{print $2; exit}')"
   if [[ -n "$codesign_identity" ]]; then
     codesign_keychain=(--keychain "$local_signing_keychain_v2")
+    certificate_keychain=("$local_signing_keychain_v2")
   fi
 fi
 if [[ -z "$codesign_identity" ]]; then
@@ -93,6 +95,7 @@ if [[ -z "$codesign_identity" && -f "$legacy_signing_keychain" ]]; then
   codesign_identity="$(security find-identity -v -p codesigning "$legacy_signing_keychain" | awk '/Meya Local Code Signing/{print $2; exit}')"
   if [[ -n "$codesign_identity" ]]; then
     codesign_keychain=(--keychain "$legacy_signing_keychain")
+    certificate_keychain=("$legacy_signing_keychain")
   fi
 fi
 signed_req_file="$build_dir/meya-signed.req"
@@ -104,11 +107,41 @@ sign_nested() {
 }
 
 if [[ -n "$codesign_identity" ]]; then
-  # Bind TCC to the certificate selected on this Mac without publishing a
-  # maintainer-specific Apple Developer Team ID in the source tree.
-  printf 'designated => identifier "com.dp.inputmethod.LocalVoiceInput" and certificate leaf = H"%s"\n' \
-    "$codesign_identity" > "$signed_req_file"
-  if ! sign_nested "$codesign_identity" || ! codesign --force \
+  if ! sign_nested "$codesign_identity"; then
+    echo "签名身份存在但不可用；已停止构建，避免临时签名导致麦芽权限失效。" >&2
+    exit 1
+  fi
+  # Derive the signing OU from the selected certificate at build time.
+  # This preserves the stable TCC requirement without publishing a maintainer
+  # identifier in the repository. Self-signed certificates fall back to their
+  # public certificate hash.
+  identity_upper="$(printf '%s' "$codesign_identity" | tr '[:lower:]' '[:upper:]')"
+  certificate_alias="$(security find-certificate -a -Z "${certificate_keychain[@]}" \
+    | awk -v wanted="$identity_upper" '
+      $0 == "SHA-1 hash: " wanted { found=1; next }
+      found && /"alis"<blob>=/ {
+        line=$0
+        sub(/^.*"alis"<blob>="/, "", line)
+        sub(/".*$/, "", line)
+        print line
+        exit
+      }
+    ')"
+  certificate_ou=""
+  if [[ -n "$certificate_alias" ]]; then
+    certificate_ou="$(security find-certificate -c "$certificate_alias" -p \
+      "${certificate_keychain[@]}" \
+      | openssl x509 -noout -subject -nameopt RFC2253 2>/dev/null \
+      | awk -F'OU=' 'NF > 1 {split($2, value, ","); print value[1]; exit}')"
+  fi
+  if [[ -n "$certificate_ou" && ${#certificate_ou} -le 64 ]]; then
+    printf 'designated => identifier "com.dp.inputmethod.LocalVoiceInput" and certificate leaf[subject.OU] = "%s"\n' \
+      "$certificate_ou" > "$signed_req_file"
+  else
+    printf 'designated => identifier "com.dp.inputmethod.LocalVoiceInput" and certificate leaf = H"%s"\n' \
+      "$codesign_identity" > "$signed_req_file"
+  fi
+  if ! codesign --force \
       "${codesign_keychain[@]}" \
       --entitlements "$project_dir/app/LocalVoiceInput.entitlements" \
       --requirements "$signed_req_file" \

@@ -1981,6 +1981,13 @@ private final class ModelManagerController: NSObject, NSWindowDelegate {
     }
 }
 
+private struct FeedbackCandidateResponse: Decodable {
+    let canonical: String
+    let observed: String
+    let confirmations: Int
+    let activated: Bool
+}
+
 private struct ASRResponse: Decodable {
     let id: Int?
     let event: String?
@@ -2000,6 +2007,9 @@ private struct ASRResponse: Decodable {
     let lastHypothesis: String?
     let revision: Int?
     let language: String?
+    let acceptedUnchanged: Bool?
+    let observed: [FeedbackCandidateResponse]?
+    let activated: [FeedbackCandidateResponse]?
 
     enum CodingKeys: String, CodingKey {
         case id, event, final, text, error, model, role, refined, silence, revision, language
@@ -2010,6 +2020,8 @@ private struct ASRResponse: Decodable {
         case committedEnd = "committed_end"
         case tailText = "tail_text"
         case lastHypothesis = "last_hypothesis"
+        case acceptedUnchanged = "accepted_unchanged"
+        case observed, activated
     }
 }
 
@@ -2169,7 +2181,17 @@ private final class ASRService {
         completion: @escaping Completion
     ) {
         queue.async { [weak self] in
-            guard let self, self.process.isRunning else { return }
+            guard let self else { return }
+            guard self.process.isRunning else {
+                DispatchQueue.main.async {
+                    completion(.failure(NSError(
+                        domain: "LocalVoiceInput.ASR",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "学习服务未运行"]
+                    )))
+                }
+                return
+            }
             let id = self.nextID
             self.nextID += 1
             self.pending[id] = completion
@@ -2191,6 +2213,17 @@ private final class ASRService {
             } catch {
                 self.pending.removeValue(forKey: id)
                 DispatchQueue.main.async { completion(.failure(error)) }
+                return
+            }
+            self.queue.asyncAfter(deadline: .now() + 10) { [weak self] in
+                guard let self, let expired = self.pending.removeValue(forKey: id) else { return }
+                DispatchQueue.main.async {
+                    expired(.failure(NSError(
+                        domain: "LocalVoiceInput.ASR",
+                        code: 5,
+                        userInfo: [NSLocalizedDescriptionKey: "学习请求超时，请重试"]
+                    )))
+                }
             }
         }
     }
@@ -2361,17 +2394,31 @@ private enum TextInserter {
     }
 }
 
-private final class PendingFeedbackObservation {
-    let target: AXUIElement
+private struct FeedbackSubmission {
+    let observationID: UUID
     let expectedText: String
+    let editedText: String
+    let rawText: String
+    let finalText: String
+    let audioPath: String
+    let appName: String
+}
+
+private final class PendingFeedbackObservation {
+    let id = UUID()
+    let target: AXUIElement?
+    let expectedFieldText: String?
+    let insertedText: String
     var rawText = ""
     var finalText = ""
     var audioPath = ""
     var appName = ""
 
-    init(target: AXUIElement, expectedText: String) {
+    init(target: AXUIElement?, expectedFieldText: String?, insertedText: String) {
         self.target = target
-        self.expectedText = expectedText
+        self.expectedFieldText = expectedFieldText
+        self.insertedText = insertedText
+        finalText = insertedText
     }
 }
 
@@ -2441,7 +2488,28 @@ private final class LiveDraftInserter {
 
     func commit(_ text: String) -> Bool {
         guard isReady, !text.isEmpty else { return false }
-        return replaceDraft(with: text, finish: true, captureFeedback: true)
+        return replaceDraft(with: text, finish: true)
+    }
+
+    func prepareFeedback(finalText: String) {
+        guard !finalText.isEmpty else { return }
+        var expectedFieldText: String?
+        if let initialValue {
+            let source = initialValue as NSString
+            let range = NSRange(location: originalRange.location, length: originalRange.length)
+            if range.location >= 0,
+               range.location + range.length <= source.length {
+                let expected = source.replacingCharacters(in: range, with: finalText)
+                if expected.utf16.count <= 8_000 {
+                    expectedFieldText = expected
+                }
+            }
+        }
+        pendingFeedback = PendingFeedbackObservation(
+            target: target,
+            expectedFieldText: expectedFieldText,
+            insertedText: finalText
+        )
     }
 
     func attachRecognition(rawText: String, finalText: String, audioPath: String, appName: String) {
@@ -2452,26 +2520,72 @@ private final class LiveDraftInserter {
         pendingFeedback.appName = appName
     }
 
-    func consumePendingFeedback() -> [String: String]? {
+    var hasPendingFeedback: Bool {
+        pendingFeedback?.finalText.isEmpty == false
+    }
+
+    var pendingInsertedText: String? {
         guard let pendingFeedback, !pendingFeedback.finalText.isEmpty else { return nil }
-        self.pendingFeedback = nil
-        guard let editedText = textValue(of: pendingFeedback.target),
-              editedText.utf16.count <= 8_000
+        return pendingFeedback.insertedText
+    }
+
+    func automaticFeedbackSubmission(requireModification: Bool = false) -> FeedbackSubmission? {
+        guard let pendingFeedback,
+              !pendingFeedback.finalText.isEmpty,
+              let target = pendingFeedback.target,
+              let expectedText = pendingFeedback.expectedFieldText,
+              let editedText = textValue(of: target),
+              !editedText.isEmpty,
+              editedText.utf16.count <= 8_000,
+              !requireModification || editedText != expectedText
         else { return nil }
-        return [
-            "expectedText": pendingFeedback.expectedText,
-            "editedText": editedText,
-            "rawText": pendingFeedback.rawText,
-            "finalText": pendingFeedback.finalText,
-            "audioPath": pendingFeedback.audioPath,
-            "appName": pendingFeedback.appName,
-        ]
+        return feedbackSubmission(
+            pendingFeedback,
+            expectedText: expectedText,
+            editedText: editedText
+        )
+    }
+
+    func manualFeedbackSubmission(correctedText: String) -> FeedbackSubmission? {
+        let corrected = correctedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pendingFeedback,
+              !pendingFeedback.finalText.isEmpty,
+              !corrected.isEmpty,
+              corrected != pendingFeedback.insertedText,
+              corrected.utf16.count <= 8_000
+        else { return nil }
+        return feedbackSubmission(
+            pendingFeedback,
+            expectedText: pendingFeedback.insertedText,
+            editedText: corrected
+        )
+    }
+
+    func clearPendingFeedback(observationID: UUID) {
+        guard pendingFeedback?.id == observationID else { return }
+        pendingFeedback = nil
+    }
+
+    private func feedbackSubmission(
+        _ pending: PendingFeedbackObservation,
+        expectedText: String,
+        editedText: String
+    ) -> FeedbackSubmission {
+        FeedbackSubmission(
+            observationID: pending.id,
+            expectedText: expectedText,
+            editedText: editedText,
+            rawText: pending.rawText,
+            finalText: pending.finalText,
+            audioPath: pending.audioPath,
+            appName: pending.appName
+        )
     }
 
     @discardableResult
     func cancel() -> Bool {
         if !usesAccessibilityRange {
-            guard isReady, replaceUsingKeyboard(with: originalText, finish: true, captureFeedback: false) else {
+            guard isReady, replaceUsingKeyboard(with: originalText, finish: true) else {
                 reset()
                 return false
             }
@@ -2500,13 +2614,9 @@ private final class LiveDraftInserter {
         return true
     }
 
-    private func replaceDraft(with replacement: String, finish: Bool, captureFeedback: Bool = false) -> Bool {
+    private func replaceDraft(with replacement: String, finish: Bool) -> Bool {
         if !usesAccessibilityRange {
-            return replaceUsingKeyboard(
-                with: replacement,
-                finish: finish,
-                captureFeedback: captureFeedback
-            )
+            return replaceUsingKeyboard(with: replacement, finish: finish)
         }
         guard let target, targetStillFocused(target), ownsCurrentDraft(target),
               setSelectedRange(ownedRange, on: target),
@@ -2524,7 +2634,6 @@ private final class LiveDraftInserter {
         let caret = CFRange(location: ownedRange.location + ownedRange.length, length: 0)
         _ = setSelectedRange(caret, on: target)
         if finish {
-            if captureFeedback { captureCommit(target: target, replacement: replacement) }
             reset()
         }
         return true
@@ -2532,8 +2641,7 @@ private final class LiveDraftInserter {
 
     private func replaceUsingKeyboard(
         with replacement: String,
-        finish: Bool,
-        captureFeedback: Bool = false
+        finish: Bool
     ) -> Bool {
         guard frontmostApplicationIsUnchanged(), keyboardTargetIsSafe() else {
             writeDiagnostic(state: "unicode_fallback_lost_focus")
@@ -2549,7 +2657,6 @@ private final class LiveDraftInserter {
         lastDraft = replacement
         writeDiagnostic(state: finish ? "committed_unicode_fallback" : "updated_unicode_fallback")
         if finish {
-            if captureFeedback, let target { captureCommit(target: target, replacement: replacement) }
             reset()
         }
         return true
@@ -2696,18 +2803,6 @@ private final class LiveDraftInserter {
         ) == .success
         else { return nil }
         return value as? String
-    }
-
-    private func captureCommit(target: AXUIElement, replacement: String) {
-        guard let initialValue else { return }
-        let source = initialValue as NSString
-        let range = NSRange(location: originalRange.location, length: originalRange.length)
-        guard range.location >= 0,
-              range.location + range.length <= source.length
-        else { return }
-        let expected = source.replacingCharacters(in: range, with: replacement)
-        guard expected.utf16.count <= 8_000 else { return }
-        pendingFeedback = PendingFeedbackObservation(target: target, expectedText: expected)
     }
 
     private func surroundingText(of element: AXUIElement, selection: CFRange, limit: Int = 800) -> String {
@@ -3492,22 +3587,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         overlay.showResult()
+        // Capture the observation before any final insertion path can reset the
+        // live-draft state. This also covers InputMethodKit and clipboard/event
+        // fallbacks used by Electron and web-based editors.
+        liveDraftInserter.prepareFeedback(finalText: finalText)
         let inserted: Bool
         if liveDraftInserter.commit(finalText) {
             inserted = true
-            if let response, let audioURL {
-                liveDraftInserter.attachRecognition(
-                    rawText: response.rawText ?? "",
-                    finalText: finalText,
-                    audioPath: audioURL.path,
-                    appName: recordingAppName
-                )
-            }
         } else if let inputController = recordingInputController ?? activeInputController {
             inputController.commitFinalText(finalText)
             inserted = true
         } else {
             inserted = TextInserter.insert(finalText)
+        }
+        if let response, let audioURL {
+            liveDraftInserter.attachRecognition(
+                rawText: response.rawText ?? "",
+                finalText: finalText,
+                audioPath: audioURL.path,
+                appName: recordingAppName
+            )
         }
         recordingInputController = nil
         if !inserted {
@@ -3520,40 +3619,114 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @discardableResult
     private func submitPendingFeedback(explicit: Bool = false) -> Bool {
-        guard let feedback = liveDraftInserter.consumePendingFeedback(),
-              let service = previewService
-        else { return false }
+        guard let feedback = liveDraftInserter.automaticFeedbackSubmission(
+            requireModification: explicit
+        ) else { return false }
+        return submitFeedback(feedback, explicit: explicit)
+    }
+
+    @discardableResult
+    private func submitFeedback(_ feedback: FeedbackSubmission, explicit: Bool) -> Bool {
+        guard let service = previewService else { return false }
         service.submitFeedback(
-            expectedText: feedback["expectedText"] ?? "",
-            editedText: feedback["editedText"] ?? "",
-            rawText: feedback["rawText"] ?? "",
-            finalText: feedback["finalText"] ?? "",
-            audioPath: feedback["audioPath"] ?? "",
-            appName: feedback["appName"] ?? "",
+            expectedText: feedback.expectedText,
+            editedText: feedback.editedText,
+            rawText: feedback.rawText,
+            finalText: feedback.finalText,
+            audioPath: feedback.audioPath,
+            appName: feedback.appName,
             explicit: explicit
         ) { [weak self] result in
             switch result {
-            case .success:
+            case .success(let response):
+                self?.liveDraftInserter.clearPendingFeedback(
+                    observationID: feedback.observationID
+                )
                 if explicit {
-                    self?.overlay.show(status: "已记录刚才的确认", text: "可学习的修改已保存到本机个人词库")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                        self?.overlay.hide()
-                    }
+                    self?.showFeedbackResult(response)
                 }
             case .failure(let error):
                 NSLog("本地纠正反馈记录失败: %@", error.localizedDescription)
+                if explicit {
+                    self?.overlay.show(status: "学习失败", text: error.localizedDescription)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                        self?.overlay.hide()
+                    }
+                }
             }
         }
         return true
     }
 
     @objc private func learnLastCorrection() {
-        guard submitPendingFeedback(explicit: true) else {
+        if submitPendingFeedback(explicit: true) {
+            return
+        }
+        guard liveDraftInserter.hasPendingFeedback else {
             overlay.show(status: "暂无可学习的修改", text: "先完成一次语音输入并修改结果，再点击这里")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                 self?.overlay.hide()
             }
             return
+        }
+        showManualLearningDialog()
+    }
+
+    private func showManualLearningDialog() {
+        guard let insertedText = liveDraftInserter.pendingInsertedText else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "确认上一句的正确文本"
+        alert.informativeText = "输入或粘贴修改后的正确内容。发送后、网页输入框或无法读取全文时，会使用这个结果学习。正确的标准术语需要先存在于个人词库。"
+        alert.addButton(withTitle: "学习")
+        alert.addButton(withTitle: "取消")
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 112))
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        let editor = NSTextView(frame: scrollView.bounds)
+        editor.isRichText = false
+        editor.font = .systemFont(ofSize: 13)
+        editor.string = insertedText
+        editor.textContainerInset = NSSize(width: 6, height: 6)
+        scrollView.documentView = editor
+        alert.accessoryView = scrollView
+
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = editor
+        editor.selectAll(nil)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let feedback = liveDraftInserter.manualFeedbackSubmission(
+            correctedText: editor.string
+        ) else {
+            overlay.show(status: "没有检测到修改", text: "请把识别错误的部分改成个人词库中的标准写法")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                self?.overlay.hide()
+            }
+            return
+        }
+        if !submitFeedback(feedback, explicit: true) {
+            overlay.show(status: "学习服务未就绪", text: "请稍后重试，刚才的记录仍然保留")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.overlay.hide()
+            }
+        }
+    }
+
+    private func showFeedbackResult(_ response: ASRResponse) {
+        let activated = response.activated ?? []
+        let observed = response.observed ?? []
+        if let learned = activated.first ?? observed.first {
+            let status = activated.isEmpty ? "已确认这个说法" : "已学习刚才的修改"
+            overlay.show(status: status, text: "\(learned.observed) → \(learned.canonical)")
+        } else {
+            overlay.show(
+                status: "未发现可学习的术语",
+                text: "请先在个人词库加入正确的标准写法，再把上一句中的错误部分改成该写法"
+            )
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.overlay.hide()
         }
     }
 

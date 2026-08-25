@@ -14,6 +14,7 @@ from glossary import GlossaryEntry, load_glossary, serialize_glossary  # noqa: E
 def main() -> int:
     entries = [GlossaryEntry("NovaKit"), GlossaryEntry("K8s"), GlossaryEntry("DevPilot")]
     assert infer_replacements("部署诺瓦到K8s", "部署NovaKit到K8s", entries) == [("诺瓦", "NovaKit")]
+    assert infer_replacements("部署novacat到K8s", "部署NovaKit到K8s", entries) == [("novacat", "NovaKit")]
     assert infer_replacements("部署NovaKit", "部署NovaKit然后测试", entries) == []
 
     with tempfile.TemporaryDirectory() as directory:
@@ -49,7 +50,22 @@ def main() -> int:
             user_data_dir=root,
         )
         assert accepted["accepted_unchanged"] is True
-        assert (root / "feedback-events.jsonl").read_text(encoding="utf-8").count("\n") == 3
+
+        explicit = process_feedback(
+            expected="使用dev pilet",
+            edited="使用DevPilot",
+            raw_text="使用dev pilet",
+            final_text="使用dev pilet",
+            audio_path="recording.wav",
+            app_name="CodeEditor",
+            entries=load_glossary(glossary),
+            glossary_path=glossary,
+            user_data_dir=root,
+            explicit=True,
+        )
+        assert explicit["activated"][0]["canonical"] == "DevPilot"
+        assert load_glossary(glossary)[2].mistakes == ("dev pilet",)
+        assert (root / "feedback-events.jsonl").read_text(encoding="utf-8").count("\n") == 4
 
     print("feedback learning tests passed")
     return 0
