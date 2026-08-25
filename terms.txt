@@ -1,0 +1,13 @@
+# 每行一个术语，# 开头的行会被忽略
+FunASR
+Paraformer
+Zipformer
+sherpa-onnx
+Apple Silicon
+MLX
+Whisper
+Kubernetes
+GitHub Actions
+持续集成
+语音识别
+热词模型

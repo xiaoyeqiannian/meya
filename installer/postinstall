@@ -1,0 +1,63 @@
+#!/bin/zsh
+set -u
+
+console_user="$(/usr/bin/stat -f '%Su' /dev/console)"
+if [[ -z "$console_user" || "$console_user" == "root" || "$console_user" == "loginwindow" ]]; then
+  exit 0
+fi
+
+user_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')"
+if [[ -z "$user_home" ]]; then
+  exit 0
+fi
+
+payload="/Library/Application Support/LocalVoiceInput/InstallerPayload/Meya.app.payload"
+target_dir="$user_home/Library/Input Methods"
+target="$target_dir/麦芽 Meya.app"
+legacy_target="$target_dir/LocalVoiceInput.app"
+maya_target="$target_dir/MAYA.app"
+agent_dir="$user_home/Library/LaunchAgents"
+agent="$agent_dir/com.dp.inputmethod.LocalVoiceInput.agent.plist"
+agent_label="com.dp.inputmethod.LocalVoiceInput.agent"
+agent_template="/Library/Application Support/LocalVoiceInput/InstallerPayload/com.dp.inputmethod.LocalVoiceInput.agent.plist"
+user_uid="$(/usr/bin/id -u "$console_user")"
+
+/bin/launchctl bootout "gui/$user_uid/$agent_label" >/dev/null 2>&1 || true
+
+/usr/bin/killall LocalVoiceInput >/dev/null 2>&1 || true
+/usr/bin/killall MAYA >/dev/null 2>&1 || true
+/usr/bin/killall Meya >/dev/null 2>&1 || true
+backup_root="$user_home/Library/Application Support/Meya/app-backups"
+/bin/mkdir -p "$target_dir" "$agent_dir" "$backup_root"
+/usr/bin/find "$target_dir" -maxdepth 1 \( -name '*.backup' -o -name '*.app.backup' \) -exec /bin/mv {} "$backup_root/" \;
+if [[ -d "$target" ]]; then
+  timestamp="$(/bin/date '+%Y%m%d-%H%M%S')"
+  /bin/mv "$target" "$backup_root/麦芽-Meya-preinstall-$timestamp.app.backup"
+fi
+if [[ -d "$maya_target" ]]; then
+  timestamp="$(/bin/date '+%Y%m%d-%H%M%S')"
+  /bin/mv "$maya_target" "$backup_root/MAYA-pre-Meya-$timestamp.app.backup"
+fi
+if [[ -d "$legacy_target" ]]; then
+  timestamp="$(/bin/date '+%Y%m%d-%H%M%S')"
+  /bin/mv "$legacy_target" "$backup_root/LocalVoiceInput-pre-MAYA-$timestamp.app.backup"
+fi
+/usr/bin/ditto "$payload" "$target"
+/usr/sbin/chown -R "$console_user":staff "$target"
+
+helper="/Library/Application Support/LocalVoiceInput/InstallerPayload/register-input-method"
+if [[ ! -x "$helper" ]]; then
+  helper="$target/Contents/Helpers/register-input-method"
+fi
+if [[ -x "$helper" ]]; then
+  /bin/launchctl asuser "$user_uid" /usr/bin/sudo -u "$console_user" "$helper" "$target" --voice-only >/dev/null 2>&1 || true
+fi
+
+/bin/cp "$agent_template" "$agent"
+/usr/bin/plutil -replace ProgramArguments -json "[\"$target/Contents/MacOS/Meya\"]" "$agent"
+/usr/sbin/chown "$console_user":staff "$agent"
+/bin/chmod 600 "$agent"
+/bin/launchctl bootstrap "gui/$user_uid" "$agent" >/dev/null 2>&1 || true
+/bin/launchctl kickstart -k "gui/$user_uid/$agent_label" >/dev/null 2>&1 || true
+
+exit 0

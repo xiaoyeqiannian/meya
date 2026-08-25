@@ -1,0 +1,4 @@
+{
+  "preview_model": "paraformer:iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
+  "final_model": "paraformer:iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+}

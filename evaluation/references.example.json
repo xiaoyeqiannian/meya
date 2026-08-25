@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "references": {
+    "sample-001.wav": {
+      "reference": "把 NovaKit 部署到 K8s。",
+      "terms": ["NovaKit", "K8s"],
+      "source": "human-transcribed-example"
+    },
+    "sample-002.wav": {
+      "reference": null,
+      "terms": ["DevPilot"],
+      "source": "term-only-example"
+    }
+  }
+}
