@@ -14,7 +14,11 @@ def main() -> int:
     assert "manualFeedbackSubmission" in final_flow
     assert "showManualLearningDialog" in final_flow
     assert "captureFeedbackBaseline" in final_flow
+    assert "captureCurrentFeedbackEdit" in source
     assert "feedbackDialogTexts" in source
+    assert "func menuWillOpen(_ menu: NSMenu)" in source
+    assert "focusedElement(applicationPID:" in source
+    assert "kAXStringForRangeParameterizedAttribute" in source
     assert "识别原文（只读）" in source
     assert "正确文本（请修改）" in source
     assert "clearPendingFeedback" in final_flow

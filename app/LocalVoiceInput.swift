@@ -2407,15 +2407,23 @@ private struct FeedbackSubmission {
 private final class PendingFeedbackObservation {
     let id = UUID()
     let target: AXUIElement?
+    let applicationPID: pid_t?
     var expectedFieldText: String?
+    var latestEditedFieldText: String?
     let insertedText: String
     var rawText = ""
     var finalText = ""
     var audioPath = ""
     var appName = ""
 
-    init(target: AXUIElement?, expectedFieldText: String?, insertedText: String) {
+    init(
+        target: AXUIElement?,
+        applicationPID: pid_t?,
+        expectedFieldText: String?,
+        insertedText: String
+    ) {
         self.target = target
+        self.applicationPID = applicationPID
         self.expectedFieldText = expectedFieldText
         self.insertedText = insertedText
         finalText = insertedText
@@ -2507,6 +2515,7 @@ private final class LiveDraftInserter {
         }
         pendingFeedback = PendingFeedbackObservation(
             target: target,
+            applicationPID: frontmostPID,
             expectedFieldText: expectedFieldText,
             insertedText: finalText
         )
@@ -2518,13 +2527,30 @@ private final class LiveDraftInserter {
     func captureFeedbackBaseline() {
         guard let pendingFeedback,
               pendingFeedback.expectedFieldText == nil,
-              let target = pendingFeedback.target,
-              let currentText = textValue(of: target),
-              !currentText.isEmpty,
-              currentText.utf16.count <= 8_000,
-              currentText.localizedCaseInsensitiveContains(pendingFeedback.insertedText)
+              let currentText = feedbackTextCandidates(for: pendingFeedback).first(where: {
+                  $0.localizedCaseInsensitiveContains(pendingFeedback.insertedText)
+              })
         else { return }
         pendingFeedback.expectedFieldText = currentText
+    }
+
+    /// Snapshot the live editor before the status-menu action runs. React and
+    /// Electron frequently replace their AX node after each edit, so the node
+    /// retained at recording time may be stale even though the field is still
+    /// readable. Re-querying the original application by PID finds the new
+    /// focused node without relying on whichever app owns the menu.
+    func captureCurrentFeedbackEdit() {
+        guard let pendingFeedback else { return }
+        let candidates = feedbackTextCandidates(for: pendingFeedback)
+        guard !candidates.isEmpty else { return }
+        let baseline = pendingFeedback.expectedFieldText ?? pendingFeedback.insertedText
+        if let modified = candidates.first(where: { $0 != baseline }) {
+            pendingFeedback.latestEditedFieldText = modified
+        } else if pendingFeedback.latestEditedFieldText == nil {
+            // Do not overwrite a modified snapshot captured in menuWillOpen
+            // with a stale pre-edit AX node observed by the later action.
+            pendingFeedback.latestEditedFieldText = candidates.first
+        }
     }
 
     func attachRecognition(rawText: String, finalText: String, audioPath: String, appName: String) {
@@ -2540,12 +2566,10 @@ private final class LiveDraftInserter {
     }
 
     func automaticFeedbackSubmission(requireModification: Bool = false) -> FeedbackSubmission? {
+        captureCurrentFeedbackEdit()
         guard let pendingFeedback,
               !pendingFeedback.finalText.isEmpty,
-              let target = pendingFeedback.target,
-              let editedText = textValue(of: target),
-              !editedText.isEmpty,
-              editedText.utf16.count <= 8_000
+              let editedText = pendingFeedback.latestEditedFieldText
         else { return nil }
         // If a full-field baseline was unavailable, compare the recognized
         // sentence with the currently readable composer. This is the common
@@ -2560,10 +2584,10 @@ private final class LiveDraftInserter {
     }
 
     func feedbackDialogTexts() -> (recognized: String, corrected: String)? {
+        captureCurrentFeedbackEdit()
         guard let pendingFeedback, !pendingFeedback.finalText.isEmpty else { return nil }
         let recognized = pendingFeedback.expectedFieldText ?? pendingFeedback.insertedText
-        let current = pendingFeedback.target.flatMap { textValue(of: $0) }
-        let corrected = current.flatMap { value in
+        let corrected = pendingFeedback.latestEditedFieldText.flatMap { value in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty || trimmed == recognized ? nil : value
         } ?? recognized
@@ -2761,6 +2785,46 @@ private final class LiveDraftInserter {
         return (value as! AXUIElement)
     }
 
+    private func focusedElement(applicationPID: pid_t) -> AXUIElement? {
+        let application = AXUIElementCreateApplication(applicationPID)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXFocusedUIElementAttribute as CFString,
+            &value
+        ) == .success,
+              let value
+        else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    private func feedbackTextCandidates(
+        for pending: PendingFeedbackObservation
+    ) -> [String] {
+        var elements: [AXUIElement] = []
+        if let applicationPID = pending.applicationPID,
+           let current = focusedElement(applicationPID: applicationPID),
+           !isSecureField(current) {
+            elements.append(current)
+        }
+        if let original = pending.target,
+           !elements.contains(where: { CFEqual($0, original) }),
+           !isSecureField(original) {
+            elements.append(original)
+        }
+
+        var values: [String] = []
+        for element in elements {
+            guard let value = textValue(of: element),
+                  !value.isEmpty,
+                  value.utf16.count <= 8_000,
+                  !values.contains(value)
+            else { continue }
+            values.append(value)
+        }
+        return values
+    }
+
     private func targetStillFocused(_ element: AXUIElement) -> Bool {
         guard let focused = focusedElement() else { return false }
         return CFEqual(focused, element)
@@ -2823,13 +2887,48 @@ private final class LiveDraftInserter {
 
     private func textValue(of element: AXUIElement) -> String? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        if AXUIElementCopyAttributeValue(
             element,
             kAXValueAttribute as CFString,
             &value
+        ) == .success,
+           let text = stringValue(value) {
+            return text
+        }
+
+        // Rich web editors often expose text only through the parameterized
+        // range API instead of AXValue.
+        var lengthValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXNumberOfCharactersAttribute as CFString,
+            &lengthValue
+        ) == .success,
+              let number = lengthValue as? NSNumber,
+              number.intValue > 0,
+              number.intValue <= 8_000
+        else { return nil }
+        var range = CFRange(location: 0, length: number.intValue)
+        guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
+        value = nil
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXStringForRangeParameterizedAttribute as CFString,
+            rangeValue,
+            &value
         ) == .success
         else { return nil }
-        return value as? String
+        return stringValue(value)
+    }
+
+    private func stringValue(_ value: CFTypeRef?) -> String? {
+        if let string = value as? String {
+            return string
+        }
+        if let attributed = value as? NSAttributedString {
+            return attributed.string
+        }
+        return nil
     }
 
     private func surroundingText(of element: AXUIElement, selection: CFRange, limit: Int = 800) -> String {
@@ -2961,7 +3060,7 @@ private enum RollingWindow {
     }
 }
 
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static weak var shared: AppDelegate?
 
     private let overlay = OverlayController()
@@ -3058,6 +3157,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.toolTip = "麦芽 Meya（长按 Fn 录音，松开识别）"
 
         let menu = NSMenu()
+        menu.delegate = self
         let modelManagerItem = NSMenuItem(title: "管理识别模型…", action: #selector(openModelManager), keyEquivalent: "")
         modelManagerItem.target = self
         menu.addItem(modelManagerItem)
@@ -3092,6 +3192,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
         statusItem.menu = menu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        // Read the original app's focused editor before dispatching a menu
+        // action. The action can then compare it with the retained ASR result
+        // directly, without asking the user to type the correction twice.
+        liveDraftInserter.captureCurrentFeedbackEdit()
     }
 
     private func setStatusIcon(description: String) {
