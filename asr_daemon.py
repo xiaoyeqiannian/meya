@@ -48,6 +48,7 @@ from transcribe import (  # noqa: E402
 MODEL_SOURCE: str | None = None
 MODEL_BACKEND, MODEL_BACKEND_NAME = split_model_identifier(MODEL_NAME)
 PARAFORMER_ADAPTER: ParaformerAdapter | None = None
+HOTWORD_CATALOG_REPORT = PROJECT_DIR / "runtime" / "hotword-catalog-report.json"
 
 
 def emit(payload: dict) -> None:
@@ -146,6 +147,24 @@ def requested_hotword_limit(request: dict) -> int:
         return max(0, min(24, int(request.get("hotword_limit", 16))))
     except (TypeError, ValueError):
         return 16
+
+
+def refresh_hotword_catalog(request_id: int = 0) -> dict:
+    glossary = load_glossary(user_file("glossary.tsv", fallback_in_project=False))
+    if PARAFORMER_ADAPTER is None:
+        HOTWORD_CATALOG_REPORT.unlink(missing_ok=True)
+        return {
+            "id": request_id,
+            "event": "hotword_catalog_refreshed",
+            "supported": False,
+            "entries": len(glossary),
+        }
+    summary = PARAFORMER_ADAPTER.refresh_hotword_catalog(glossary)
+    return {
+        "id": request_id,
+        "event": "hotword_catalog_refreshed",
+        **summary,
+    }
 
 
 def feedback_request(request: dict) -> dict:
@@ -398,6 +417,10 @@ def main() -> int:
             MODEL_SOURCE = resolve_model_source(MODEL_BACKEND_NAME)
             ModelHolder.get_model(MODEL_SOURCE, mx.float16)
             warmup_model(MODEL_SOURCE)
+        if MODEL_ROLE == "final" or (
+            PARAFORMER_ADAPTER is not None and PARAFORMER_ADAPTER.is_seaco
+        ):
+            refresh_hotword_catalog()
         emit({
             "event": "ready",
             "model": MODEL_NAME,
@@ -424,6 +447,9 @@ def main() -> int:
                 return 0
             if request.get("command") == "feedback":
                 emit(feedback_request(request))
+                continue
+            if request.get("command") == "refresh_hotword_catalog":
+                emit(refresh_hotword_catalog(request_id))
                 continue
             if request.get("command") != "transcribe":
                 raise ValueError("不支持的命令")

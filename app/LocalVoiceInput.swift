@@ -1087,6 +1087,7 @@ private struct HotwordReport: Decodable {
 private final class KeywordLibraryController: NSObject, NSWindowDelegate,
     NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private let projectDirectory: URL
+    private let onGlossarySaved: () -> Void
     private var window: NSWindow!
     private let tableView = NSTableView()
     private var rows: [GlossaryRow] = []
@@ -1099,8 +1100,9 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
     private let mistakesColumn = NSUserInterfaceItemIdentifier("mistakes")
     private let statusColumn = NSUserInterfaceItemIdentifier("hotwordStatus")
 
-    init(projectDirectory: URL) {
+    init(projectDirectory: URL, onGlossarySaved: @escaping () -> Void) {
         self.projectDirectory = projectDirectory
+        self.onGlossarySaved = onGlossarySaved
         super.init()
         buildWindow()
     }
@@ -1112,6 +1114,12 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
         window.makeKeyAndOrderFront(nil)
     }
 
+    func refreshHotwordStatuses() {
+        loadHotwordReport()
+        tableView.reloadData()
+        updateStatus(summary(for: rows))
+    }
+
     private var termsURL: URL {
         UserDataStore.termsURL
     }
@@ -1121,7 +1129,7 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
     }
 
     private var hotwordReportURL: URL {
-        projectDirectory.appendingPathComponent("runtime/hotword-report.json")
+        projectDirectory.appendingPathComponent("runtime/hotword-catalog-report.json")
     }
 
     private func buildWindow() {
@@ -1390,6 +1398,7 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
             rows = normalized
             tableView.reloadData()
             window.isDocumentEdited = false
+            onGlossarySaved()
             window.close()
         } catch {
             statusLabel.textColor = .systemRed
@@ -2227,6 +2236,48 @@ private final class ASRService {
                         domain: "LocalVoiceInput.ASR",
                         code: 5,
                         userInfo: [NSLocalizedDescriptionKey: "学习请求超时，请重试"]
+                    )))
+                }
+            }
+        }
+    }
+
+    func refreshHotwordCatalog(completion: @escaping Completion) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.process.isRunning else {
+                DispatchQueue.main.async {
+                    completion(.failure(NSError(
+                        domain: "LocalVoiceInput.ASR",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "热词检测服务未运行"]
+                    )))
+                }
+                return
+            }
+            let id = self.nextID
+            self.nextID += 1
+            self.pending[id] = completion
+            let request: [String: Any] = [
+                "id": id,
+                "command": "refresh_hotword_catalog",
+            ]
+            do {
+                var data = try JSONSerialization.data(withJSONObject: request)
+                data.append(0x0A)
+                try self.inputPipe.fileHandleForWriting.write(contentsOf: data)
+            } catch {
+                self.pending.removeValue(forKey: id)
+                DispatchQueue.main.async { completion(.failure(error)) }
+                return
+            }
+            self.queue.asyncAfter(deadline: .now() + 10) { [weak self] in
+                guard let self, let expired = self.pending.removeValue(forKey: id) else { return }
+                DispatchQueue.main.async {
+                    expired(.failure(NSError(
+                        domain: "LocalVoiceInput.ASR",
+                        code: 5,
+                        userInfo: [NSLocalizedDescriptionKey: "热词检测超时"]
                     )))
                 }
             }
@@ -3797,6 +3848,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 if explicit {
                     self?.showFeedbackResult(response)
                 }
+                if !(response.activated ?? []).isEmpty {
+                    self?.refreshHotwordCatalog()
+                }
             case .failure(let error):
                 NSLog("本地纠正反馈记录失败: %@", error.localizedDescription)
                 if explicit {
@@ -3926,9 +3980,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     @objc private func openTerms() {
         if keywordLibraryController == nil {
-            keywordLibraryController = KeywordLibraryController(projectDirectory: projectDirectory)
+            keywordLibraryController = KeywordLibraryController(
+                projectDirectory: projectDirectory
+            ) { [weak self] in
+                self?.refreshHotwordCatalog()
+            }
         }
         keywordLibraryController?.show()
+        refreshHotwordCatalog()
+    }
+
+    private func refreshHotwordCatalog() {
+        guard let service = refineService ?? previewService else { return }
+        service.refreshHotwordCatalog { [weak self] result in
+            switch result {
+            case .success:
+                self?.keywordLibraryController?.refreshHotwordStatuses()
+            case .failure(let error):
+                NSLog("完整热词检测刷新失败: %@", error.localizedDescription)
+            }
+        }
     }
 
     @objc private func openModelManager() {
@@ -4011,6 +4082,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 return
             }
             self.refreshModelStatus()
+            self.keywordLibraryController?.refreshHotwordStatuses()
         }
         service.onFatal = { [weak self, weak service] message in
             guard let self, let service else { return }

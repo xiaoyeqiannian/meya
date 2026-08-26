@@ -116,7 +116,8 @@ class ParaformerAdapter:
         )
         self.is_seaco = bool(re.search(r"^model:\s*SeacoParaformer\s*$", config, re.MULTILINE))
         self.seg_dict_path = self.source / "seg_dict"
-        self.report_path = project_dir / "runtime" / "hotword-report.json"
+        self.catalog_report_path = project_dir / "runtime" / "hotword-catalog-report.json"
+        self.active_report_path = project_dir / "runtime" / f"hotword-active-report-{role}.json"
         self.punctuation_source = (
             resolve_punctuation_source(project_dir) if role == "final" and not self.is_streaming else None
         )
@@ -143,13 +144,44 @@ class ParaformerAdapter:
             max_forms_per_entry=max_forms_per_entry,
         )
         write_compilation_report(
-            self.report_path,
+            self.active_report_path,
             compilation,
             model=self.identifier,
         )
         selected = list(compilation.selected_hotwords)
         write_hotword_file(self.hotword_file, selected)
         return selected
+
+    def refresh_hotword_catalog(
+        self,
+        entries: list[GlossaryEntry],
+        *,
+        max_terms: int = 100,
+        max_chars: int = 1_000,
+    ) -> dict[str, int | bool]:
+        """Validate the complete glossary without changing active decoding."""
+        if not self.is_seaco or not self.seg_dict_path.exists():
+            self.catalog_report_path.unlink(missing_ok=True)
+            return {"supported": False, "entries": len(entries)}
+        compilation = compile_glossary(
+            entries,
+            self.seg_dict_path,
+            max_terms=max_terms,
+            max_chars=max_chars,
+        )
+        write_compilation_report(
+            self.catalog_report_path,
+            compilation,
+            model=self.identifier,
+        )
+        return {
+            "supported": True,
+            "entries": len(compilation.entries),
+            "effective_entries": compilation.effective_entries,
+            "partial_entries": compilation.partial_entries,
+            "unknown_entries": compilation.unknown_entries,
+            "selected_hotwords": len(compilation.selected_hotwords),
+        }
 
     def load(self) -> None:
         # FunASR itself is model-agnostic, while this adapter pins it to a local

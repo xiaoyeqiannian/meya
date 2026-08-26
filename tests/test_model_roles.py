@@ -68,6 +68,9 @@ def main() -> int:
     if "install_model_holder_cache" in daemon_source:
         print("FAIL: one daemon process should hold only one Whisper model")
         failures += 1
+    if 'request.get("command") == "refresh_hotword_catalog"' not in daemon_source:
+        print("FAIL: final worker must support refreshing the complete hotword catalog")
+        failures += 1
 
     swift = Path(__file__).resolve().parents[1] / "app" / "LocalVoiceInput.swift"
     swift_source = swift.read_text(encoding="utf-8")

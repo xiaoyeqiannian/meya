@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 import sys
@@ -10,6 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from asr_adapters import (  # noqa: E402
+    ParaformerAdapter,
     _merge_stream_text,
     paraformer_identifier,
     resolve_punctuation_source,
@@ -17,6 +19,7 @@ from asr_adapters import (  # noqa: E402
     split_model_identifier,
     write_hotword_file,
 )
+from glossary import GlossaryEntry  # noqa: E402
 
 
 def main() -> int:
@@ -57,6 +60,23 @@ def main() -> int:
             "Acme CLI",
             "GPU 驱动",
         ]
+
+        seaco = project / "models/paraformer/iic--seaco-test"
+        seaco.mkdir(parents=True)
+        (seaco / "config.yaml").write_text("model: SeacoParaformer\n", encoding="utf-8")
+        (seaco / "model.pt").touch()
+        (seaco / "seg_dict").write_text("main ma@@ in\n", encoding="utf-8")
+        adapter = ParaformerAdapter(project, "iic/seaco-test", role="final")
+        assert adapter.catalog_report_path.name == "hotword-catalog-report.json"
+        assert adapter.active_report_path.name == "hotword-active-report-final.json"
+        catalog = adapter.refresh_hotword_catalog([
+            GlossaryEntry("main"),
+            GlossaryEntry("NovaKit"),
+        ])
+        assert catalog["entries"] == 2
+        adapter.prepare_hotwords([GlossaryEntry("main")], max_terms=1)
+        assert json.loads(adapter.catalog_report_path.read_text(encoding="utf-8"))["summary"]["entries"] == 2
+        assert json.loads(adapter.active_report_path.read_text(encoding="utf-8"))["summary"]["entries"] == 1
 
     print("ASR adapter tests passed")
     return 0

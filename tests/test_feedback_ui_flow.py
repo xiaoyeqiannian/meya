@@ -24,6 +24,8 @@ def main() -> int:
     assert "clearPendingFeedback" in final_flow
     assert "if !explicit || foundMapping" in final_flow
     assert "consumePendingFeedback" not in source
+    assert 'runtime/hotword-catalog-report.json' in source
+    assert 'command": "refresh_hotword_catalog' in source
     print("feedback UI flow tests passed")
     return 0
 
