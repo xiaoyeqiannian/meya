@@ -875,11 +875,16 @@ private final class OverlayController {
         statusLabel.shadow = statusShadow
 
         textLabel.font = .systemFont(ofSize: 13, weight: .regular)
-        textLabel.textColor = .labelColor
+        textLabel.textColor = .white
         textLabel.alignment = .center
         textLabel.maximumNumberOfLines = 2
         textLabel.lineBreakMode = .byTruncatingTail
         textLabel.translatesAutoresizingMaskIntoConstraints = false
+        let textShadow = NSShadow()
+        textShadow.shadowColor = NSColor(calibratedWhite: 0, alpha: 0.72)
+        textShadow.shadowBlurRadius = 2
+        textShadow.shadowOffset = NSSize(width: 0, height: -1)
+        textLabel.shadow = textShadow
 
         meterContainer.translatesAutoresizingMaskIntoConstraints = false
         meterView.translatesAutoresizingMaskIntoConstraints = false

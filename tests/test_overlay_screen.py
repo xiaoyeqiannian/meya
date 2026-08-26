@@ -32,6 +32,13 @@ def main() -> int:
         print("FAIL: overlay placement still hard-codes the main display")
         return 1
 
+    overlay_start = source.index("private final class OverlayController")
+    overlay_end = source.index("private final class KeywordLibraryController")
+    overlay_source = source[overlay_start:overlay_end]
+    if "textLabel.textColor = .white" not in overlay_source:
+        print("FAIL: overlay body text is not explicitly white on the dark backdrop")
+        return 1
+
     print("overlay screen tests passed")
     return 0
 
