@@ -13,7 +13,12 @@ def main() -> int:
     assert final_flow.index("prepareFeedback(finalText: finalText)") < final_flow.index("commit(finalText)")
     assert "manualFeedbackSubmission" in final_flow
     assert "showManualLearningDialog" in final_flow
+    assert "captureFeedbackBaseline" in final_flow
+    assert "feedbackDialogTexts" in source
+    assert "识别原文（只读）" in source
+    assert "正确文本（请修改）" in source
     assert "clearPendingFeedback" in final_flow
+    assert "if !explicit || foundMapping" in final_flow
     assert "consumePendingFeedback" not in source
     print("feedback UI flow tests passed")
     return 0

@@ -16,6 +16,12 @@ def main() -> int:
     assert infer_replacements("部署诺瓦到K8s", "部署NovaKit到K8s", entries) == [("诺瓦", "NovaKit")]
     assert infer_replacements("部署novacat到K8s", "部署NovaKit到K8s", entries) == [("novacat", "NovaKit")]
     assert infer_replacements("部署NovaKit", "部署NovaKit然后测试", entries) == []
+    assert infer_replacements(
+        "把netas部署到K8s",
+        "把Nydus部署到K8s",
+        entries,
+        include_new_terms=True,
+    ) == [("netas", "Nydus")]
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -65,7 +71,23 @@ def main() -> int:
         )
         assert explicit["activated"][0]["canonical"] == "DevPilot"
         assert load_glossary(glossary)[2].mistakes == ("dev pilet",)
-        assert (root / "feedback-events.jsonl").read_text(encoding="utf-8").count("\n") == 4
+
+        new_term = process_feedback(
+            expected="使用polarisctl发布",
+            edited="使用NebulaCLI发布",
+            raw_text="使用polarisctl发布",
+            final_text="使用polarisctl发布",
+            audio_path="recording.wav",
+            app_name="CodeEditor",
+            entries=load_glossary(glossary),
+            glossary_path=glossary,
+            user_data_dir=root,
+            explicit=True,
+        )
+        assert new_term["activated"][0]["canonical"] == "NebulaCLI"
+        added = next(entry for entry in load_glossary(glossary) if entry.canonical == "NebulaCLI")
+        assert added.mistakes == ("polarisctl",)
+        assert (root / "feedback-events.jsonl").read_text(encoding="utf-8").count("\n") == 5
 
     print("feedback learning tests passed")
     return 0

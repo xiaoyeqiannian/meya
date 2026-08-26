@@ -39,8 +39,10 @@ def infer_replacements(
     expected: str,
     edited: str,
     entries: list[GlossaryEntry],
+    *,
+    include_new_terms: bool = False,
 ) -> list[tuple[str, str]]:
-    """Infer only exact canonical replacements from narrow replace operations."""
+    """Infer conservative replacements, optionally accepting explicit new terms."""
     replacements: list[tuple[str, str]] = []
     matcher = SequenceMatcher(a=expected, b=edited, autojunk=False)
     for operation, left_start, left_end, right_start, right_end in matcher.get_opcodes():
@@ -73,6 +75,10 @@ def infer_replacements(
                     replacement = (source, canonical)
                     if replacement not in replacements:
                         replacements.append(replacement)
+    if include_new_terms:
+        for replacement in _infer_direct_replacements(expected, edited):
+            if replacement not in replacements:
+                replacements.append(replacement)
     # SequenceMatcher can split one human edit into adjacent replace/insert
     # opcodes and yield overlapping sources. Keep the longest conservative
     # source per canonical term so one correction creates one learned form.
@@ -86,6 +92,49 @@ def infer_replacements(
         if previous is None or len(source) > len(previous[0]):
             best[key] = (source, canonical)
     return [best[key] for key in order]
+
+
+_ASCII_TERM_CHARACTER = re.compile(r"[A-Za-z0-9._+/-]")
+_MEANINGFUL_CHARACTER = re.compile(r"[A-Za-z0-9\u3400-\u4DBF\u4E00-\u9FFF]")
+
+
+def _expand_ascii_term(text: str, start: int, end: int) -> tuple[int, int]:
+    """Expand a partial SequenceMatcher opcode to an ASCII term boundary."""
+    while start > 0 and _ASCII_TERM_CHARACTER.fullmatch(text[start - 1]):
+        start -= 1
+    while end < len(text) and _ASCII_TERM_CHARACTER.fullmatch(text[end]):
+        end += 1
+    return start, end
+
+
+def _infer_direct_replacements(expected: str, edited: str) -> list[tuple[str, str]]:
+    """Infer explicit user-confirmed replacements for a new canonical term."""
+    replacements: list[tuple[str, str]] = []
+    matcher = SequenceMatcher(a=expected, b=edited, autojunk=False)
+    for operation, left_start, left_end, right_start, right_end in matcher.get_opcodes():
+        if operation != "replace":
+            continue
+        segments = expected[left_start:left_end] + edited[right_start:right_end]
+        if any(character.isascii() and character.isalnum() for character in segments):
+            left_start, left_end = _expand_ascii_term(expected, left_start, left_end)
+            right_start, right_end = _expand_ascii_term(edited, right_start, right_end)
+        source = _clean_segment(expected[left_start:left_end])
+        canonical = _clean_segment(edited[right_start:right_end])
+        if (
+            source
+            and canonical
+            and source.casefold() != canonical.casefold()
+            and _MEANINGFUL_CHARACTER.search(source)
+            and _MEANINGFUL_CHARACTER.search(canonical)
+            and 2 <= len(source) <= 32
+            and 2 <= len(canonical) <= 32
+            and len(source.split()) <= 4
+            and len(canonical.split()) <= 4
+        ):
+            replacement = (source, canonical)
+            if replacement not in replacements:
+                replacements.append(replacement)
+    return replacements
 
 
 def accepted_terms(text: str, entries: list[GlossaryEntry]) -> list[str]:
@@ -139,7 +188,12 @@ def process_feedback(
 ) -> dict[str, Any]:
     """Persist local evidence and activate a mistake only after two confirmations."""
     unchanged = expected == edited
-    replacements = [] if unchanged else infer_replacements(expected, edited, entries)
+    replacements = [] if unchanged else infer_replacements(
+        expected,
+        edited,
+        entries,
+        include_new_terms=explicit,
+    )
     candidate_path = user_data_dir / "feedback-candidates.json"
     candidate_payload = _read_json(candidate_path)
     candidates = candidate_payload.get("candidates", {})

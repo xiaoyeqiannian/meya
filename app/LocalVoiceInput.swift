@@ -2407,7 +2407,7 @@ private struct FeedbackSubmission {
 private final class PendingFeedbackObservation {
     let id = UUID()
     let target: AXUIElement?
-    let expectedFieldText: String?
+    var expectedFieldText: String?
     let insertedText: String
     var rawText = ""
     var finalText = ""
@@ -2512,6 +2512,21 @@ private final class LiveDraftInserter {
         )
     }
 
+    /// Capture the field after the final text has actually landed. Some
+    /// Electron/contenteditable controls expose AXValue only after text is
+    /// inserted, so the baseline cannot always be built in begin().
+    func captureFeedbackBaseline() {
+        guard let pendingFeedback,
+              pendingFeedback.expectedFieldText == nil,
+              let target = pendingFeedback.target,
+              let currentText = textValue(of: target),
+              !currentText.isEmpty,
+              currentText.utf16.count <= 8_000,
+              currentText.localizedCaseInsensitiveContains(pendingFeedback.insertedText)
+        else { return }
+        pendingFeedback.expectedFieldText = currentText
+    }
+
     func attachRecognition(rawText: String, finalText: String, audioPath: String, appName: String) {
         guard let pendingFeedback else { return }
         pendingFeedback.rawText = rawText
@@ -2524,21 +2539,19 @@ private final class LiveDraftInserter {
         pendingFeedback?.finalText.isEmpty == false
     }
 
-    var pendingInsertedText: String? {
-        guard let pendingFeedback, !pendingFeedback.finalText.isEmpty else { return nil }
-        return pendingFeedback.insertedText
-    }
-
     func automaticFeedbackSubmission(requireModification: Bool = false) -> FeedbackSubmission? {
         guard let pendingFeedback,
               !pendingFeedback.finalText.isEmpty,
               let target = pendingFeedback.target,
-              let expectedText = pendingFeedback.expectedFieldText,
               let editedText = textValue(of: target),
               !editedText.isEmpty,
-              editedText.utf16.count <= 8_000,
-              !requireModification || editedText != expectedText
+              editedText.utf16.count <= 8_000
         else { return nil }
+        // If a full-field baseline was unavailable, compare the recognized
+        // sentence with the currently readable composer. This is the common
+        // Codex/Electron fallback path and avoids an unnecessary dialog.
+        let expectedText = pendingFeedback.expectedFieldText ?? pendingFeedback.insertedText
+        guard !requireModification || editedText != expectedText else { return nil }
         return feedbackSubmission(
             pendingFeedback,
             expectedText: expectedText,
@@ -2546,17 +2559,31 @@ private final class LiveDraftInserter {
         )
     }
 
-    func manualFeedbackSubmission(correctedText: String) -> FeedbackSubmission? {
+    func feedbackDialogTexts() -> (recognized: String, corrected: String)? {
+        guard let pendingFeedback, !pendingFeedback.finalText.isEmpty else { return nil }
+        let recognized = pendingFeedback.expectedFieldText ?? pendingFeedback.insertedText
+        let current = pendingFeedback.target.flatMap { textValue(of: $0) }
+        let corrected = current.flatMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty || trimmed == recognized ? nil : value
+        } ?? recognized
+        return (recognized, corrected)
+    }
+
+    func manualFeedbackSubmission(originalText: String, correctedText: String) -> FeedbackSubmission? {
+        let original = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
         let corrected = correctedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pendingFeedback,
               !pendingFeedback.finalText.isEmpty,
+              !original.isEmpty,
               !corrected.isEmpty,
-              corrected != pendingFeedback.insertedText,
+              corrected != original,
+              original.utf16.count <= 8_000,
               corrected.utf16.count <= 8_000
         else { return nil }
         return feedbackSubmission(
             pendingFeedback,
-            expectedText: pendingFeedback.insertedText,
+            expectedText: original,
             editedText: corrected
         )
     }
@@ -3608,6 +3635,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 appName: recordingAppName
             )
         }
+        // Try immediately and once more after Electron has processed the
+        // posted Unicode event. A captured baseline makes later edits fully
+        // automatic even though opening the status menu changes app focus.
+        liveDraftInserter.captureFeedbackBaseline()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.liveDraftInserter.captureFeedbackBaseline()
+        }
         recordingInputController = nil
         if !inserted {
             overlay.update(status: "已复制到剪贴板；请允许辅助功能后粘贴")
@@ -3639,9 +3673,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] result in
             switch result {
             case .success(let response):
-                self?.liveDraftInserter.clearPendingFeedback(
-                    observationID: feedback.observationID
-                )
+                let foundMapping = !(response.activated ?? []).isEmpty
+                    || !(response.observed ?? []).isEmpty
+                // No mapping means no learning happened. Preserve the
+                // observation so the user can correct it and retry.
+                if !explicit || foundMapping || response.acceptedUnchanged == true {
+                    self?.liveDraftInserter.clearPendingFeedback(
+                        observationID: feedback.observationID
+                    )
+                }
                 if explicit {
                     self?.showFeedbackResult(response)
                 }
@@ -3673,33 +3713,56 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showManualLearningDialog() {
-        guard let insertedText = liveDraftInserter.pendingInsertedText else { return }
+        guard let texts = liveDraftInserter.feedbackDialogTexts() else { return }
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "确认上一句的正确文本"
-        alert.informativeText = "输入或粘贴修改后的正确内容。发送后、网页输入框或无法读取全文时，会使用这个结果学习。正确的标准术语需要先存在于个人词库。"
+        alert.messageText = "对照学习上一句"
+        alert.informativeText = "上面是麦芽插入的原文，请在下面把错误部分改成正确写法。新术语会自动加入个人词库。"
         alert.addButton(withTitle: "学习")
         alert.addButton(withTitle: "取消")
 
-        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 112))
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .bezelBorder
-        let editor = NSTextView(frame: scrollView.bounds)
-        editor.isRichText = false
-        editor.font = .systemFont(ofSize: 13)
-        editor.string = insertedText
-        editor.textContainerInset = NSSize(width: 6, height: 6)
-        scrollView.documentView = editor
-        alert.accessoryView = scrollView
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 214))
+        let originalLabel = NSTextField(labelWithString: "识别原文（只读）")
+        originalLabel.frame = NSRect(x: 0, y: 190, width: 440, height: 18)
+        accessory.addSubview(originalLabel)
+
+        let originalScroll = NSScrollView(frame: NSRect(x: 0, y: 112, width: 440, height: 74))
+        originalScroll.hasVerticalScroller = true
+        originalScroll.borderType = .bezelBorder
+        let originalEditor = NSTextView(frame: originalScroll.bounds)
+        originalEditor.isRichText = false
+        originalEditor.isEditable = false
+        originalEditor.font = .systemFont(ofSize: 13)
+        originalEditor.string = texts.recognized
+        originalEditor.textContainerInset = NSSize(width: 6, height: 6)
+        originalScroll.documentView = originalEditor
+        accessory.addSubview(originalScroll)
+
+        let correctedLabel = NSTextField(labelWithString: "正确文本（请修改）")
+        correctedLabel.frame = NSRect(x: 0, y: 88, width: 440, height: 18)
+        accessory.addSubview(correctedLabel)
+
+        let correctedScroll = NSScrollView(frame: NSRect(x: 0, y: 8, width: 440, height: 76))
+        correctedScroll.hasVerticalScroller = true
+        correctedScroll.borderType = .bezelBorder
+        let correctedEditor = NSTextView(frame: correctedScroll.bounds)
+        correctedEditor.isRichText = false
+        correctedEditor.font = .systemFont(ofSize: 13)
+        correctedEditor.string = texts.corrected
+        correctedEditor.textContainerInset = NSSize(width: 6, height: 6)
+        correctedScroll.documentView = correctedEditor
+        accessory.addSubview(correctedScroll)
+        alert.accessoryView = accessory
 
         NSApp.activate(ignoringOtherApps: true)
-        alert.window.initialFirstResponder = editor
-        editor.selectAll(nil)
+        alert.window.initialFirstResponder = correctedEditor
+        correctedEditor.selectAll(nil)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         guard let feedback = liveDraftInserter.manualFeedbackSubmission(
-            correctedText: editor.string
+            originalText: originalEditor.string,
+            correctedText: correctedEditor.string
         ) else {
-            overlay.show(status: "没有检测到修改", text: "请把识别错误的部分改成个人词库中的标准写法")
+            overlay.show(status: "没有检测到修改", text: "请在「正确文本」中改动错误部分，再点击学习")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                 self?.overlay.hide()
             }
@@ -3721,8 +3784,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             overlay.show(status: status, text: "\(learned.observed) → \(learned.canonical)")
         } else {
             overlay.show(
-                status: "未发现可学习的术语",
-                text: "请先在个人词库加入正确的标准写法，再把上一句中的错误部分改成该写法"
+                status: "还没有提取出替换词",
+                text: "请重试并只改动识别错误的部分；刚才的记录已保留"
             )
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
