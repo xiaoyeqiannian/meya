@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import os
@@ -26,6 +27,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from asr_adapters import (  # noqa: E402
     ParaformerAdapter,
+    QwenAdapter,
     resolve_catalog_adapter,
     split_model_identifier,
 )
@@ -57,12 +59,26 @@ from transcribe import (  # noqa: E402
 MODEL_SOURCE: str | None = None
 MODEL_BACKEND, MODEL_BACKEND_NAME = split_model_identifier(MODEL_NAME)
 PARAFORMER_ADAPTER: ParaformerAdapter | None = None
+QWEN_ADAPTER: QwenAdapter | None = None
 HOTWORD_CATALOG_REPORT = PROJECT_DIR / "runtime" / "hotword-catalog-report.json"
 LEARNING_STORE: FeedbackStore | None = None
+STREAM_SESSION_ID: str | None = None
+STREAM_PROCESSED_SAMPLES = 0
+STREAM_REVISION = 0
 
 
 def emit(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def decode_pcm16(payload: str) -> np.ndarray:
+    """Decode little-endian mono PCM16 sent directly by the macOS audio tap."""
+    raw = base64.b64decode(payload, validate=True)
+    if len(raw) % 2:
+        raise ValueError("流式音频数据长度无效")
+    if not raw:
+        return np.zeros(0, dtype=np.float32)
+    return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
 
 
 def prompt_for_terms(entries: list[GlossaryEntry] | None = None) -> str | None:
@@ -145,6 +161,25 @@ def selected_paraformer_hotwords(
             max_forms_per_entry=1,
         )
     return []
+
+
+def selected_qwen_hotwords(selection: HotwordSelection, limit: int = 16) -> list[str]:
+    """Pass only context-evidenced terms to Qwen's native hotword prompt."""
+    return [entry.canonical for entry in selection.entries[:limit]]
+
+
+def resolve_qwen_language(language: str | None) -> str | None:
+    value = str(language or "").strip().casefold()
+    if value in {"", "auto", "detect", "none"}:
+        return None
+    return {
+        "zh": "Chinese",
+        "zh-cn": "Chinese",
+        "chinese": "Chinese",
+        "en": "English",
+        "en-us": "English",
+        "english": "English",
+    }.get(value, language)
 
 
 def requested_hotword_limit(request: dict) -> int:
@@ -366,6 +401,20 @@ def transcribe_request(request: dict) -> dict:
             window_start=float(request.get("window_start") or 0.0),
             revision=int(request["revision"]) if request.get("revision") is not None else None,
         )
+    elif MODEL_BACKEND == "qwen":
+        if QWEN_ADAPTER is None:
+            raise RuntimeError("Qwen3-ASR 模型尚未加载")
+        if final and not bool(request.get("disable_hotwords", False)):
+            hotwords_used = selected_qwen_hotwords(
+                selection,
+                requested_hotword_limit(request),
+            )
+        result = QWEN_ADAPTER.transcribe(
+            audio,
+            duration=duration,
+            language=resolve_qwen_language(str(requested_language)),
+            hotwords=hotwords_used,
+        )
     else:
         import mlx_whisper
 
@@ -464,8 +513,124 @@ def transcribe_request(request: dict) -> dict:
     }
 
 
+def stream_start_request(request: dict) -> dict:
+    """Start one cache-backed Paraformer session without touching the filesystem."""
+    global STREAM_SESSION_ID, STREAM_PROCESSED_SAMPLES, STREAM_REVISION
+    if (
+        MODEL_BACKEND != "paraformer"
+        or PARAFORMER_ADAPTER is None
+        or not PARAFORMER_ADAPTER.is_streaming
+    ):
+        raise RuntimeError("当前过程模型不支持原生流式识别")
+    session_id = str(request.get("session") or "").strip()
+    if not session_id:
+        raise ValueError("流式会话缺少 session")
+    PARAFORMER_ADAPTER.reset_stream()
+    STREAM_SESSION_ID = session_id
+    STREAM_PROCESSED_SAMPLES = 0
+    STREAM_REVISION = 0
+    return {
+        "id": int(request.get("id", 0)),
+        "event": "stream_started",
+        "streaming": True,
+        "session": session_id,
+        "model": MODEL_NAME,
+    }
+
+
+def stream_chunk_request(request: dict) -> dict:
+    """Decode only newly captured PCM while retaining Paraformer encoder state."""
+    global STREAM_PROCESSED_SAMPLES, STREAM_REVISION
+    started = time.perf_counter()
+    session_id = str(request.get("session") or "").strip()
+    if not STREAM_SESSION_ID or session_id != STREAM_SESSION_ID:
+        raise RuntimeError("流式会话已失效")
+    if PARAFORMER_ADAPTER is None or not PARAFORMER_ADAPTER.is_streaming:
+        raise RuntimeError("Paraformer Streaming 模型尚未就绪")
+
+    audio = decode_pcm16(str(request.get("pcm16") or ""))
+    request_id = int(request.get("id", 0))
+    if not len(audio):
+        return {
+            "id": request_id,
+            "final": False,
+            "text": "",
+            "raw_text": "",
+            "streaming": True,
+            "revision": STREAM_REVISION,
+            "duration": STREAM_PROCESSED_SAMPLES / 16_000,
+            "elapsed": time.perf_counter() - started,
+        }
+
+    window_start = STREAM_PROCESSED_SAMPLES / 16_000
+    STREAM_REVISION += 1
+    result = PARAFORMER_ADAPTER.transcribe(
+        audio,
+        duration=len(audio) / 16_000,
+        final=False,
+        window_start=window_start,
+        revision=STREAM_REVISION,
+    )
+    STREAM_PROCESSED_SAMPLES += len(audio)
+    utterance_duration = STREAM_PROCESSED_SAMPLES / 16_000
+    raw_text = str(result.get("text") or "").strip()
+    if is_untrusted_preview_text(raw_text, utterance_duration, "zh"):
+        raw_text = ""
+
+    normalized_text = compact_cjk_spaces(raw_text)
+    glossary = load_glossary(user_file("glossary.tsv", fallback_in_project=False))
+    evidenced = select_hotword_entries(
+        glossary,
+        draft_text=normalized_text,
+        limit=requested_hotword_limit(request),
+    )
+    if glossary:
+        text, changes = apply_glossary_corrections(normalized_text, list(evidenced.entries))
+    else:
+        text, changes = apply_corrections(normalized_text, user_file("corrections.tsv"))
+    client_text = text if SAFE_LIVE_DRAFT else ""
+    return {
+        "id": request_id,
+        "final": False,
+        "text": client_text,
+        "raw_text": raw_text,
+        "duration": utterance_duration,
+        "elapsed": time.perf_counter() - started,
+        "silence": not bool(raw_text),
+        "model": MODEL_NAME,
+        "language": "zh",
+        "committed_text": "",
+        "committed_end": 0.0,
+        "tail_text": raw_text,
+        "last_hypothesis": raw_text,
+        "revision": STREAM_REVISION,
+        "streaming": True,
+        "corrections": [{"from": source, "to": target} for source, target in changes],
+    }
+
+
+def stream_cancel_request(request: dict) -> dict:
+    """Drop an unfinished preview tail; the final worker will refine the utterance."""
+    global STREAM_SESSION_ID, STREAM_PROCESSED_SAMPLES, STREAM_REVISION
+    session_id = str(request.get("session") or "").strip()
+    if PARAFORMER_ADAPTER is not None and (
+        not STREAM_SESSION_ID or not session_id or session_id == STREAM_SESSION_ID
+    ):
+        PARAFORMER_ADAPTER.reset_stream()
+    if not session_id or session_id == STREAM_SESSION_ID:
+        STREAM_SESSION_ID = None
+        STREAM_PROCESSED_SAMPLES = 0
+        STREAM_REVISION = 0
+    return {
+        "id": int(request.get("id", 0)),
+        "event": "stream_cancelled",
+        "streaming": True,
+        "session": session_id,
+    }
+
+
 def main() -> int:
-    global MODEL_SOURCE, PARAFORMER_ADAPTER
+    global MODEL_SOURCE, PARAFORMER_ADAPTER, QWEN_ADAPTER
     if "--refresh-catalog-only" in sys.argv[1:]:
         try:
             result = refresh_hotword_catalog()
@@ -479,6 +644,10 @@ def main() -> int:
             PARAFORMER_ADAPTER = ParaformerAdapter(PROJECT_DIR, MODEL_BACKEND_NAME, role=MODEL_ROLE)
             PARAFORMER_ADAPTER.load()
             PARAFORMER_ADAPTER.warmup()
+        elif MODEL_BACKEND == "qwen":
+            QWEN_ADAPTER = QwenAdapter(PROJECT_DIR, MODEL_BACKEND_NAME, role=MODEL_ROLE)
+            QWEN_ADAPTER.load()
+            QWEN_ADAPTER.warmup()
         else:
             import mlx.core as mx
             from mlx_whisper.transcribe import ModelHolder
@@ -495,6 +664,9 @@ def main() -> int:
             "model": MODEL_NAME,
             "backend": MODEL_BACKEND,
             "role": MODEL_ROLE,
+            "streaming": bool(
+                PARAFORMER_ADAPTER is not None and PARAFORMER_ADAPTER.is_streaming
+            ),
             "punctuation": bool(
                 PARAFORMER_ADAPTER is not None and PARAFORMER_ADAPTER.punctuation_source is not None
             ),
@@ -525,6 +697,15 @@ def main() -> int:
                 continue
             if request.get("command") == "refresh_hotword_catalog":
                 emit(refresh_hotword_catalog(request_id))
+                continue
+            if request.get("command") == "stream_start":
+                emit(stream_start_request(request))
+                continue
+            if request.get("command") == "stream_chunk":
+                emit(stream_chunk_request(request))
+                continue
+            if request.get("command") == "stream_cancel":
+                emit(stream_cancel_request(request))
                 continue
             if request.get("command") != "transcribe":
                 raise ValueError("不支持的命令")

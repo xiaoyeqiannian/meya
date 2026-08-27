@@ -15,6 +15,7 @@ from seaco_hotwords import compile_glossary, write_compilation_report
 
 
 PARAFORMER_PREFIX = "paraformer:"
+QWEN_PREFIX = "qwen:"
 DEFAULT_PARAFORMER_MODEL = "funasr/paraformer-zh"
 DEFAULT_SEACO_MODEL = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 DEFAULT_PUNCTUATION_MODEL = "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
@@ -65,11 +66,108 @@ def split_model_identifier(identifier: str) -> tuple[str, str]:
         if not model:
             raise ValueError("Paraformer 模型标识不能为空")
         return "paraformer", model
+    if value.lower().startswith(QWEN_PREFIX):
+        model = value[len(QWEN_PREFIX) :].strip()
+        if not model:
+            raise ValueError("Qwen 模型标识不能为空")
+        return "qwen", model
+    # Migrate the short-lived broken UI format which saved Qwen repository
+    # names without a backend prefix and consequently treated them as Whisper.
+    if "qwen3-asr" in value.casefold():
+        return "qwen", value
     return "whisper", value
 
 
 def paraformer_identifier(model: str) -> str:
     return PARAFORMER_PREFIX + model
+
+
+def qwen_identifier(model: str) -> str:
+    return QWEN_PREFIX + model
+
+
+def resolve_qwen_source(project_dir: Path, model: str) -> Path:
+    """Resolve an installed Qwen3-ASR snapshot without network access."""
+    source = Path(model).expanduser()
+    if not source.exists():
+        hub = project_dir / "models/huggingface/hub"
+        cached = hub / ("models--" + model.replace("/", "--"))
+        ref = cached / "refs/main"
+        if ref.exists():
+            source = cached / "snapshots" / ref.read_text(encoding="utf-8").strip()
+        else:
+            snapshots = cached / "snapshots"
+            found = sorted(path for path in snapshots.glob("*") if path.is_dir())
+            if len(found) == 1:
+                source = found[0]
+    if not source.exists():
+        raise FileNotFoundError(f"Qwen3-ASR 模型尚未下载：{model}")
+    config_path = source / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Qwen3-ASR 模型目录缺少 config.json：{source}")
+    try:
+        import json
+
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"无法读取 Qwen3-ASR 配置：{source}") from error
+    if str(config.get("model_type") or "").casefold() != "qwen3_asr":
+        raise ValueError(f"目录不是兼容的 Qwen3-ASR 模型：{source}")
+    if not any((source / name).exists() for name in ("model.safetensors", "weights.safetensors")):
+        raise FileNotFoundError(f"Qwen3-ASR 模型目录缺少权重文件：{source}")
+    return source.resolve()
+
+
+class QwenAdapter:
+    """MLX Qwen3-ASR adapter with the same result shape as other backends."""
+
+    backend = "qwen"
+
+    def __init__(self, project_dir: Path, model: str, role: str = "final") -> None:
+        self.identifier = qwen_identifier(model)
+        self.source = resolve_qwen_source(project_dir, model)
+        self.role = role
+        self.model: Any | None = None
+
+    def load(self) -> None:
+        from mlx_audio.stt import load
+
+        self.model = load(str(self.source))
+
+    def warmup(self) -> None:
+        if self.model is None:
+            raise RuntimeError("Qwen3-ASR 模型尚未加载")
+        audio = np.zeros(16_000, dtype=np.float32)
+        audio[:800] = 0.02
+        self.model.generate(audio, language="Chinese", max_tokens=32)
+
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        *,
+        duration: float,
+        language: str | None = None,
+        hotwords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if self.model is None:
+            raise RuntimeError("Qwen3-ASR 模型尚未加载")
+        result = self.model.generate(
+            audio,
+            language=language,
+            hotwords=hotwords or None,
+            verbose=False,
+        )
+        text = str(getattr(result, "text", "") or "").strip()
+        detected = getattr(result, "language", "") or ""
+        if isinstance(detected, (list, tuple)):
+            detected = detected[0] if detected else ""
+        detected_language = str(detected).strip() or language
+        return {
+            "text": text,
+            "language": detected_language,
+            "segments": ([{"start": 0.0, "end": duration, "text": text}] if text else []),
+            "streaming": False,
+        }
 
 
 def resolve_paraformer_source(project_dir: Path, model: str) -> Path:
@@ -222,11 +320,16 @@ class ParaformerAdapter:
         options: dict[str, Any] = dict(
             model=str(self.source),
             device="cpu",
-            ncpu=max(2, min(6, os.cpu_count() or 4)),
             disable_update=True,
             disable_pbar=True,
             log_level="ERROR",
         )
+        # FunASR's streaming path is substantially faster on Apple Silicon
+        # with its tuned default thread profile. Supplying ncpu forces a slower
+        # execution path; offline/final models still benefit from an explicit
+        # cap so they do not monopolize the machine.
+        if not self.is_streaming:
+            options["ncpu"] = max(2, min(6, os.cpu_count() or 4))
         if self.punctuation_source is not None:
             options["punc_model"] = str(self.punctuation_source)
         self.model = AutoModel(**options)

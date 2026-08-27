@@ -63,6 +63,7 @@ private final class AudioCapture {
     private var tapInstalled = false
 
     var onLevels: (([Float]) -> Void)?
+    var onSamples: (([Float]) -> Void)?
 
     var sampleCount: Int {
         lock.lock()
@@ -161,6 +162,7 @@ private final class AudioCapture {
         }
 
         let values = Array(UnsafeBufferPointer(start: channel, count: Int(outputBuffer.frameLength)))
+        onSamples?(values)
         let levels = makeMeterLevels(from: values, barCount: 12)
         let levelCallback = onLevels
         DispatchQueue.main.async {
@@ -1720,6 +1722,7 @@ private struct ModelSelection: Equatable {
 
 private enum ModelConfigurationStore {
     static let paraformerPrefix = "paraformer:"
+    static let qwenPrefix = "qwen:"
     static let defaultPreviewModel = "paraformer:iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
     static let defaultFinalModel = "paraformer:iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
     static let previewCandidates = [
@@ -1744,9 +1747,10 @@ private enum ModelConfigurationStore {
               let configuration = try? JSONDecoder().decode(ModelConfiguration.self, from: data)
         else { return defaultSelection(projectDirectory: projectDirectory) }
 
-        let legacy = normalized(configuration.model)
-        let final = normalized(configuration.finalModel) ?? legacy ?? defaultFinalModel
-        let preview = normalized(configuration.previewModel)
+        let legacy = normalizedModelIdentifier(normalized(configuration.model))
+        let final = normalizedModelIdentifier(normalized(configuration.finalModel))
+            ?? legacy ?? defaultFinalModel
+        let preview = normalizedModelIdentifier(normalized(configuration.previewModel))
             ?? resolvePreviewModel(final: final, projectDirectory: projectDirectory)
         return ModelSelection(preview: preview, final: final)
     }
@@ -1775,12 +1779,17 @@ private enum ModelConfigurationStore {
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         )) ?? []
-        let whisperModels = entries.compactMap { url -> String? in
+        let huggingFaceModels = entries.compactMap { url -> String? in
             let name = url.lastPathComponent
             guard name.hasPrefix("models--") else { return nil }
             let parts = String(name.dropFirst("models--".count)).components(separatedBy: "--")
             guard parts.count >= 2 else { return nil }
-            return parts[0] + "/" + parts.dropFirst().joined(separator: "--")
+            let identifier = parts[0] + "/" + parts.dropFirst().joined(separator: "--")
+            let lowercased = identifier.lowercased()
+            if lowercased.contains("qwen3-asr") {
+                return qwenPrefix + identifier
+            }
+            return lowercased.contains("whisper") ? identifier : nil
         }
         let paraformerDirectory = projectDirectory.appendingPathComponent(
             "models/paraformer",
@@ -1805,7 +1814,7 @@ private enum ModelConfigurationStore {
             let model = url.lastPathComponent.replacingOccurrences(of: "--", with: "/")
             return paraformerPrefix + model
         }
-        return Array(Set(whisperModels + paraformerModels)).sorted()
+        return Array(Set(huggingFaceModels + paraformerModels)).sorted()
     }
 
     static func shortName(_ model: String) -> String {
@@ -1820,6 +1829,11 @@ private enum ModelConfigurationStore {
             }
             return "Paraformer · \(name.replacingOccurrences(of: "funasr/", with: ""))"
         }
+        if model.hasPrefix(qwenPrefix) {
+            let value = String(model.dropFirst(qwenPrefix.count))
+            let name = value.hasPrefix("/") ? URL(fileURLWithPath: value).lastPathComponent : value
+            return "Qwen3-ASR · " + name.replacingOccurrences(of: "mlx-community/", with: "")
+        }
         if model.hasPrefix("/") {
             return URL(fileURLWithPath: model).lastPathComponent
         }
@@ -1832,12 +1846,22 @@ private enum ModelConfigurationStore {
         ) && FileManager.default.fileExists(
             atPath: url.appendingPathComponent("model.pt").path
         )
-        return isParaformer ? paraformerPrefix + url.path : url.path
+        if isParaformer { return paraformerPrefix + url.path }
+        if let data = try? Data(contentsOf: url.appendingPathComponent("config.json")),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           (object["model_type"] as? String)?.lowercased() == "qwen3_asr" {
+            return qwenPrefix + url.path
+        }
+        return url.path
     }
 
     static func localPath(for model: String) -> String? {
         if model.hasPrefix(paraformerPrefix) {
             let value = String(model.dropFirst(paraformerPrefix.count))
+            return value.hasPrefix("/") ? value : nil
+        }
+        if model.hasPrefix(qwenPrefix) {
+            let value = String(model.dropFirst(qwenPrefix.count))
             return value.hasPrefix("/") ? value : nil
         }
         return model.hasPrefix("/") ? model : nil
@@ -1855,6 +1879,14 @@ private enum ModelConfigurationStore {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func normalizedModelIdentifier(_ value: String?) -> String? {
+        guard let value else { return nil }
+        if value.lowercased().contains("qwen3-asr"), !value.hasPrefix(qwenPrefix) {
+            return qwenPrefix + value
+        }
+        return value
     }
 }
 
@@ -1891,7 +1923,13 @@ private final class ModelManagerController: NSObject, NSWindowDelegate {
             finalName = ModelConfigurationStore.shortName(final)
         }
         rolesLabel.stringValue = "当前运行：实时识别 · \(previewName)\n当前运行：最终识别 · \(finalName)"
-        statusLabel.stringValue = preview.isEmpty ? "正在加载识别服务…" : "配置已生效"
+        if preview.isEmpty {
+            statusLabel.stringValue = "正在加载实时识别模型…"
+        } else if !finalReady {
+            statusLabel.stringValue = "正在加载最终识别模型…"
+        } else {
+            statusLabel.stringValue = "配置已生效"
+        }
     }
 
     func showError(_ message: String) {
@@ -1917,7 +1955,7 @@ private final class ModelManagerController: NSObject, NSWindowDelegate {
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
-        let explanation = NSTextField(wrappingLabelWithString: "分别选择说话过程中快速出字的模型，以及松开 Fn 后负责最终定稿的模型。支持 MLX Whisper 和 FunASR Paraformer；这里只列出本机已安装的模型，切换时不会联网。")
+        let explanation = NSTextField(wrappingLabelWithString: "分别选择说话过程中快速出字的模型，以及松开 Fn 后负责最终定稿的模型。支持 MLX Whisper、Qwen3-ASR 和 FunASR Paraformer；这里只列出本机已安装且兼容的模型，切换时不会联网。")
         explanation.textColor = .secondaryLabelColor
         explanation.translatesAutoresizingMaskIntoConstraints = false
 
@@ -2008,7 +2046,7 @@ private final class ModelManagerController: NSObject, NSWindowDelegate {
 
     @objc private func chooseLocalModel() {
         let panel = NSOpenPanel()
-        panel.title = "选择兼容的 Whisper 或 Paraformer 模型目录"
+        panel.title = "选择兼容的 Whisper、Qwen3-ASR 或 Paraformer 模型目录"
         panel.prompt = "选择模型"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -2141,6 +2179,10 @@ private struct ASRResponse: Decodable {
     let rules: [LearningRuleResponse]?
     let ruleID: Int?
     let supported: Bool?
+    let streaming: Bool?
+    let session: String?
+    let duration: Double?
+    let elapsed: Double?
 
     enum CodingKeys: String, CodingKey {
         case id, event, final, text, error, model, role, refined, silence, revision, language
@@ -2152,7 +2194,7 @@ private struct ASRResponse: Decodable {
         case tailText = "tail_text"
         case lastHypothesis = "last_hypothesis"
         case acceptedUnchanged = "accepted_unchanged"
-        case observed, activated, rules, supported
+        case observed, activated, rules, supported, streaming, session, duration, elapsed
         case ruleID = "rule_id"
     }
 }
@@ -2172,8 +2214,14 @@ private final class ASRService {
     private var nextID = 1
     private var pending: [Int: Completion] = [:]
     private var isStopping = false
+    private static let nativeStreamChunkSamples = 7_680
+    private var activeStreamSession: String?
+    private var streamBuffer: [Float] = []
+    private var streamRequestInFlight = false
+    private var streamRevision = 0
+    private var streamPartialHandler: Completion?
 
-    var onReady: ((String) -> Void)?
+    var onReady: ((String, Bool) -> Void)?
     var onFatal: ((String) -> Void)?
 
     init(projectDirectory: URL, model: String, role: String) {
@@ -2298,6 +2346,138 @@ private final class ASRService {
                         userInfo: [NSLocalizedDescriptionKey: "识别超时，请重试"]
                     )))
                 }
+            }
+        }
+    }
+
+    func beginStreaming(sessionID: String, onPartial: @escaping Completion) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.process.isRunning else {
+                DispatchQueue.main.async {
+                    onPartial(.failure(NSError(
+                        domain: "LocalVoiceInput.ASR",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "流式识别服务未运行"]
+                    )))
+                }
+                return
+            }
+            self.activeStreamSession = sessionID
+            self.streamBuffer.removeAll(keepingCapacity: true)
+            self.streamRequestInFlight = false
+            self.streamRevision = 0
+            self.streamPartialHandler = onPartial
+            self.sendRequestOnQueue(
+                ["command": "stream_start", "session": sessionID],
+                timeout: 5
+            ) { [weak self] result in
+                if case .failure = result {
+                    onPartial(result)
+                    self?.queue.async {
+                        guard self?.activeStreamSession == sessionID else { return }
+                        self?.activeStreamSession = nil
+                        self?.streamBuffer.removeAll(keepingCapacity: true)
+                        self?.streamPartialHandler = nil
+                    }
+                }
+            }
+        }
+    }
+
+    func appendStreamingSamples(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
+        queue.async { [weak self] in
+            guard let self, self.activeStreamSession != nil else { return }
+            self.streamBuffer.append(contentsOf: samples)
+            self.pumpStreamingOnQueue()
+        }
+    }
+
+    func endStreaming() {
+        queue.async { [weak self] in
+            guard let self, let sessionID = self.activeStreamSession else { return }
+            self.activeStreamSession = nil
+            self.streamBuffer.removeAll(keepingCapacity: true)
+            self.streamPartialHandler = nil
+            self.sendRequestOnQueue(
+                ["command": "stream_cancel", "session": sessionID],
+                timeout: 5
+            ) { _ in }
+        }
+    }
+
+    private func pumpStreamingOnQueue() {
+        guard let sessionID = activeStreamSession,
+              !streamRequestInFlight,
+              streamBuffer.count >= Self.nativeStreamChunkSamples
+        else { return }
+
+        let sampleCount = Self.nativeStreamChunkSamples
+        let chunk = Array(streamBuffer.prefix(sampleCount))
+        streamBuffer.removeFirst(sampleCount)
+        streamRequestInFlight = true
+        streamRevision += 1
+        let revision = streamRevision
+        let encoded = Self.encodePCM16(chunk)
+        sendRequestOnQueue(
+            [
+                "command": "stream_chunk",
+                "session": sessionID,
+                "revision": revision,
+                "pcm16": encoded,
+            ],
+            timeout: 15
+        ) { [weak self] result in
+            guard let self else { return }
+            let handler = self.streamPartialHandler
+            if self.activeStreamSession == sessionID {
+                handler?(result)
+            }
+            self.queue.async {
+                guard self.activeStreamSession == sessionID else { return }
+                self.streamRequestInFlight = false
+                self.pumpStreamingOnQueue()
+            }
+        }
+    }
+
+    private static func encodePCM16(_ samples: [Float]) -> String {
+        var pcm = samples.map { sample -> Int16 in
+            let value = max(-1, min(1, sample))
+            return Int16((value * 32_767).rounded())
+        }
+        let data = pcm.withUnsafeMutableBytes { Data($0) }
+        return data.base64EncodedString()
+    }
+
+    private func sendRequestOnQueue(
+        _ request: [String: Any],
+        timeout: Double,
+        completion: @escaping Completion
+    ) {
+        let id = nextID
+        nextID += 1
+        pending[id] = completion
+        var payload = request
+        payload["id"] = id
+        do {
+            var data = try JSONSerialization.data(withJSONObject: payload)
+            data.append(0x0A)
+            try inputPipe.fileHandleForWriting.write(contentsOf: data)
+        } catch {
+            pending.removeValue(forKey: id)
+            DispatchQueue.main.async { completion(.failure(error)) }
+            return
+        }
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, let expired = self.pending.removeValue(forKey: id) else { return }
+            DispatchQueue.main.async {
+                expired(.failure(NSError(
+                    domain: "LocalVoiceInput.ASR",
+                    code: 5,
+                    userInfo: [NSLocalizedDescriptionKey: "流式识别请求超时"]
+                )))
             }
         }
     }
@@ -2483,7 +2663,7 @@ private final class ASRService {
                 let response = try JSONDecoder().decode(ASRResponse.self, from: Data(line))
                 if response.event == "ready" {
                     DispatchQueue.main.async { [weak self] in
-                        self?.onReady?(response.model ?? "")
+                        self?.onReady?(response.model ?? "", response.streaming == true)
                     }
                     continue
                 }
@@ -3314,6 +3494,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var isFinalizing = false
     private var asrReady = false
     private var finalModelReady = false
+    private var previewNativeStreaming = false
+    private var separateFinalModelRequired = false
     private var previewModelName = ""
     private var finalModelName = ""
     private var activeSession = UUID()
@@ -3358,6 +3540,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         audioCapture.onLevels = { [weak self] levels in
             guard self?.isRecording == true else { return }
             self?.overlay.update(levels: levels)
+        }
+        audioCapture.onSamples = { [weak self] samples in
+            self?.previewService?.appendStreamingSamples(samples)
         }
 
         startASRServices(selection: ModelConfigurationStore.load(projectDirectory: projectDirectory))
@@ -3776,6 +3961,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         partialTimer?.invalidate()
         partialTimer = nil
         _ = audioCapture.stop()
+        if previewNativeStreaming {
+            previewService?.endStreaming()
+        }
         isRecording = false
         activeSession = UUID()
         partialQueued = false
@@ -3848,12 +4036,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             setStatusIcon(description: "麦芽 Meya 正在录音")
             overlay.showRecording()
             let session = activeSession
-            partialTimer = Timer.scheduledTimer(withTimeInterval: LivePreview.partialPollInterval, repeats: true) { [weak self] _ in
-                self?.requestPartialTranscription()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + LivePreview.firstPartialDelay) { [weak self] in
-                guard let self, self.isRecording, self.activeSession == session else { return }
-                self.requestPartialTranscription()
+            if previewNativeStreaming, let previewService {
+                previewService.beginStreaming(sessionID: session.uuidString) { [weak self] result in
+                    self?.applyPartialResult(result, session: session)
+                }
+            } else {
+                partialTimer = Timer.scheduledTimer(withTimeInterval: LivePreview.partialPollInterval, repeats: true) { [weak self] _ in
+                    self?.requestPartialTranscription()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + LivePreview.firstPartialDelay) { [weak self] in
+                    guard let self, self.isRecording, self.activeSession == session else { return }
+                    self.requestPartialTranscription()
+                }
             }
         } catch {
             showPermissionError("录音启动失败：\(error.localizedDescription)")
@@ -3898,27 +4092,38 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             try? FileManager.default.removeItem(at: url)
             guard let self else { return }
             self.partialInFlight = false
-            guard self.isRecording, self.activeSession == session else { return }
-            if case .success(let response) = result, (response.revision ?? revision) >= self.draftRevision - 1 {
-                self.committedText = response.committedText ?? self.committedText
-                if let committedEnd = response.committedEnd {
-                    self.committedEnd = committedEnd
-                }
-                self.lastHypothesis = response.lastHypothesis ?? self.lastHypothesis
-                let preview = response.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if !preview.isEmpty {
-                    if self.liveDraftInserter.update(preview) {
-                        self.overlay.update(status: "输入中 · 松开 Fn 定稿")
-                    } else {
-                        self.overlay.update(status: "输入中 · 浮层预览")
-                    }
-                }
-            } else if case .failure(let error) = result {
-                NSLog("临时识别失败: %@", error.localizedDescription)
-            }
+            self.applyPartialResult(result, session: session, fallbackRevision: revision)
             if self.isRecording, self.partialQueued {
                 self.requestPartialTranscription()
             }
+        }
+    }
+
+    private func applyPartialResult(
+        _ result: Result<ASRResponse, Error>,
+        session: UUID,
+        fallbackRevision: Int = 0
+    ) {
+        guard isRecording, activeSession == session else { return }
+        switch result {
+        case .success(let response):
+            let responseRevision = response.revision ?? fallbackRevision
+            guard responseRevision >= draftRevision - 1 else { return }
+            draftRevision = max(draftRevision, responseRevision)
+            committedText = response.committedText ?? committedText
+            if let value = response.committedEnd {
+                committedEnd = value
+            }
+            lastHypothesis = response.lastHypothesis ?? lastHypothesis
+            let preview = response.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !preview.isEmpty else { return }
+            if liveDraftInserter.update(preview) {
+                overlay.update(status: "输入中 · 松开 Fn 定稿")
+            } else {
+                overlay.update(status: "输入中 · 浮层预览")
+            }
+        case .failure(let error):
+            NSLog("临时识别失败: %@", error.localizedDescription)
         }
     }
 
@@ -3926,6 +4131,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         partialTimer?.invalidate()
         partialTimer = nil
         let samples = audioCapture.stop()
+        if previewNativeStreaming {
+            previewService?.endStreaming()
+        }
         isRecording = false
         isFinalizing = true
         setStatusIcon(description: "麦芽 Meya 正在整理文字")
@@ -3958,10 +4166,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             }
         }
 
-        let service = (finalModelReady ? refineService : nil) ?? previewService
-        guard let service else {
-            completeFinal(text: "", error: "识别服务未就绪")
-            return
+        let service: ASRService
+        if separateFinalModelRequired {
+            guard finalModelReady, let refineService else {
+                completeFinal(text: "", error: "所选最终识别模型尚未就绪，请在模型管理中查看加载状态")
+                return
+            }
+            service = refineService
+        } else {
+            guard let previewService else {
+                completeFinal(text: "", error: "识别服务未就绪")
+                return
+            }
+            service = previewService
         }
         let decodePath = decodeURL
         let usedWindow = decodePath != url
@@ -4428,6 +4645,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         refineService = nil
         asrReady = false
         finalModelReady = false
+        previewNativeStreaming = false
+        separateFinalModelRequired = selection.preview != selection.final
         previewModelName = ""
         finalModelName = selection.final
         refreshModelStatus()
@@ -4446,10 +4665,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         } else {
             refineService = service
         }
-        service.onReady = { [weak self, weak service] loadedModel in
+        service.onReady = { [weak self, weak service] loadedModel, nativeStreaming in
             guard let self, let service else { return }
             if role == "preview", self.previewService === service {
                 self.asrReady = true
+                self.previewNativeStreaming = nativeStreaming
                 self.previewModelName = loadedModel
                 self.setStatusIcon(description: "麦芽 Meya")
                 if self.refineService == nil {
@@ -4469,14 +4689,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             guard let self, let service else { return }
             if role == "preview", self.previewService === service {
                 self.asrReady = false
+                self.previewNativeStreaming = false
                 self.modelStatusText = "实时识别模型错误：\(message)"
                 self.modelManagerController?.showError(message)
                 self.overlay.show(status: "模型加载失败", text: message)
             } else if role == "final", self.refineService === service {
                 self.finalModelReady = false
                 self.refineService = nil
-                NSLog("定稿模型失败，松手将沿用预览: %@", message)
+                NSLog("定稿模型加载失败: %@", message)
                 self.refreshModelStatus()
+                self.modelManagerController?.showError(message)
             }
         }
         do {

@@ -12,11 +12,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from asr_adapters import (  # noqa: E402
     ParaformerAdapter,
+    QwenAdapter,
     _merge_stream_text,
     paraformer_identifier,
+    qwen_identifier,
     resolve_catalog_adapter,
     resolve_punctuation_source,
     resolve_paraformer_source,
+    resolve_qwen_source,
     split_model_identifier,
     write_hotword_file,
 )
@@ -33,6 +36,14 @@ def main() -> int:
         "funasr/paraformer-zh",
     )
     assert paraformer_identifier("funasr/paraformer-zh") == "paraformer:funasr/paraformer-zh"
+    assert split_model_identifier("qwen:mlx-community/Qwen3-ASR-1.7B-4bit") == (
+        "qwen",
+        "mlx-community/Qwen3-ASR-1.7B-4bit",
+    )
+    assert split_model_identifier("mlx-community/Qwen3-ASR-0.6B-4bit")[0] == "qwen"
+    assert qwen_identifier("mlx-community/Qwen3-ASR-0.6B-4bit") == (
+        "qwen:mlx-community/Qwen3-ASR-0.6B-4bit"
+    )
     assert _merge_stream_text("今天天气", "天气不错") == "今天天气不错"
     assert _merge_stream_text("hello", "world") == "hello world"
 
@@ -52,6 +63,27 @@ def main() -> int:
         (punctuation / "config.yaml").touch()
         (punctuation / "model.pt").touch()
         assert resolve_punctuation_source(project) == punctuation.resolve()
+
+        qwen_cache = (
+            project / "models/huggingface/hub/"
+            "models--mlx-community--Qwen3-ASR-0.6B-4bit"
+        )
+        qwen_snapshot = qwen_cache / "snapshots/revision"
+        qwen_snapshot.mkdir(parents=True)
+        (qwen_cache / "refs").mkdir()
+        (qwen_cache / "refs/main").write_text("revision\n", encoding="utf-8")
+        (qwen_snapshot / "config.json").write_text(
+            json.dumps({"model_type": "qwen3_asr"}), encoding="utf-8"
+        )
+        (qwen_snapshot / "model.safetensors").touch()
+        assert resolve_qwen_source(
+            project, "mlx-community/Qwen3-ASR-0.6B-4bit"
+        ) == qwen_snapshot.resolve()
+        qwen_adapter = QwenAdapter(
+            project, "mlx-community/Qwen3-ASR-0.6B-4bit", role="final"
+        )
+        assert qwen_adapter.identifier == "qwen:mlx-community/Qwen3-ASR-0.6B-4bit"
+        assert qwen_adapter.model is None
 
         hotword_file = write_hotword_file(
             project / "runtime/seaco-hotwords-final.txt",

@@ -71,6 +71,9 @@ def main() -> int:
     if 'request.get("command") == "refresh_hotword_catalog"' not in daemon_source:
         print("FAIL: final worker must support refreshing the complete hotword catalog")
         failures += 1
+    if 'MODEL_BACKEND == "qwen"' not in daemon_source or "QwenAdapter" not in daemon_source:
+        print("FAIL: Qwen models must use their own adapter instead of mlx_whisper")
+        failures += 1
     if '"--refresh-catalog-only" in sys.argv[1:]' not in daemon_source:
         print("FAIL: catalog-only refresh must bypass acoustic model initialization")
         failures += 1
@@ -120,6 +123,12 @@ def main() -> int:
         failures += 1
     if 'previewModel = "preview_model"' not in swift_source or 'finalModel = "final_model"' not in swift_source:
         print("FAIL: model config must persist both roles")
+        failures += 1
+    if 'static let qwenPrefix = "qwen:"' not in swift_source or 'return "Qwen3-ASR · "' not in swift_source:
+        print("FAIL: model manager must label Qwen independently from Whisper")
+        failures += 1
+    if "所选最终识别模型尚未就绪" not in swift_source:
+        print("FAIL: a failed final model must not silently fall back to the preview model")
         failures += 1
     menu_start = swift_source.find("private func setupStatusItem()")
     menu_end = swift_source.find("private func setupFunctionKeyHold()", menu_start)

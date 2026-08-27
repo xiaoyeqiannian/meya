@@ -186,7 +186,7 @@ Parafomer	Paraformer
 
 模型下载与输入法程序分离；添加新模型后，重新打开模型管理窗口即可发现。
 
-当前识别后端支持 MLX 格式的 Whisper 模型，以及 FunASR Paraformer 本地模型。两种架构都使用同一套实时/最终模型选择和 JSONL 识别协议。常用兼容模型：
+当前识别后端支持 MLX Whisper、MLX Qwen3-ASR，以及 FunASR Paraformer 本地模型。三种架构都使用同一套实时/最终模型选择和 JSONL 控制协议。Paraformer Streaming 会建立持续会话，从 macOS 录音回调直接推送 480 ms PCM16 音频块并保留编码/解码缓存，不经过定时轮询或临时 WAV 文件；非流式模型仍自动使用滚动窗口兼容路径。常用兼容模型：
 
 - `mlx-community/whisper-base-mlx`：资源占用最低，准确率较低；
 - `mlx-community/whisper-small-mlx`：轻量、延迟低；
@@ -194,6 +194,8 @@ Parafomer	Paraformer
 - `mlx-community/whisper-large-v3-turbo-4bit`：同架构 4bit 压缩版，体积小、精度略损；
 - `mlx-community/whisper-large-v3-turbo`：推荐，未量化 Turbo，速度和精度较均衡；
 - `mlx-community/whisper-large-v3-mlx`：完整大模型，准确率上限更高，但更慢、更占内存。
+- `qwen:mlx-community/Qwen3-ASR-0.6B-4bit`：速度和内存优先的 Qwen3-ASR；
+- `qwen:mlx-community/Qwen3-ASR-1.7B-4bit`：速度与准确率较均衡，支持原生热词提示；
 - `paraformer:funasr/paraformer-zh`：中英文 Paraformer，本机模型约 0.85 GB，中文出字快。
 - `paraformer:iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online`：流式中文模型，推荐用于实时草稿；
 - `paraformer:iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch`：支持热词增强的 SeACo 模型，推荐用于最终定稿。
@@ -216,9 +218,12 @@ export HF_HOME="$PWD/models/huggingface"
 export HF_HUB_CACHE="$HF_HOME/hub"
 ./.venv/bin/hf download mlx-community/whisper-large-v3-turbo-4bit
 ./.venv/bin/hf download mlx-community/whisper-large-v3-mlx
+./.venv/bin/hf download mlx-community/Qwen3-ASR-0.6B-4bit
+./.venv/bin/hf download mlx-community/Qwen3-ASR-1.7B-4bit
 ```
 
-将最后一个参数替换为其他兼容的 MLX Whisper 仓库名即可。
+模型管理只展示已实现适配器并通过本地结构检查的缓存。Qwen 会显示为
+`Qwen3-ASR · ...`，不会再被标成 Whisper；旧版曾保存的无前缀 Qwen 配置会自动迁移。
 
 ## 确认已经离线
 
