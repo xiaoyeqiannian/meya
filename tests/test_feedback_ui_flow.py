@@ -26,6 +26,16 @@ def main() -> int:
     assert "consumePendingFeedback" not in source
     assert 'runtime/hotword-catalog-report.json' in source
     assert 'command": "refresh_hotword_catalog' in source
+    assert '"--refresh-catalog-only"' in source
+    assert '"建议发音（点击采纳）"' in source
+    assert "acceptSuggestion" in source
+    assert 'saveButton.title = "正在检测…"' in source
+    assert 'case pronunciationSuggestions = "pronunciation_suggestions"' in source
+    assert 'title: "管理已学规则…"' in source
+    assert 'sendLearningCommand("list_learning_rules"' in source
+    assert 'sendLearningCommand("rollback_learning_rule"' in source
+    assert "rule.hitCount" in source
+    assert "rule.evidence" in source
     print("feedback UI flow tests passed")
     return 0
 

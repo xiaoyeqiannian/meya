@@ -7,7 +7,12 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from feedback_learning import infer_replacements, process_feedback  # noqa: E402
+from feedback_learning import (  # noqa: E402
+    infer_replacements,
+    list_learning_rules,
+    process_feedback,
+    rollback_learning_rule,
+)
 from glossary import GlossaryEntry, load_glossary, serialize_glossary  # noqa: E402
 
 
@@ -88,6 +93,19 @@ def main() -> int:
         added = next(entry for entry in load_glossary(glossary) if entry.canonical == "NebulaCLI")
         assert added.mistakes == ("polarisctl",)
         assert (root / "feedback-events.jsonl").read_text(encoding="utf-8").count("\n") == 5
+
+        rules = list_learning_rules(root)
+        learned_nova = next(rule for rule in rules if rule["canonical"] == "NovaKit" and rule["observed"] == "诺瓦")
+        assert learned_nova["confirmations"] == 2
+        assert learned_nova["hit_count"] == 0
+        rollback_learning_rule(
+            rule_id=learned_nova["id"],
+            entries=load_glossary(glossary),
+            glossary_path=glossary,
+            user_data_dir=root,
+        )
+        assert "诺瓦" not in load_glossary(glossary)[0].mistakes
+        assert learned_nova["id"] not in {rule["id"] for rule in list_learning_rules(root)}
 
     print("feedback learning tests passed")
     return 0

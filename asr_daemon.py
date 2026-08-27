@@ -24,8 +24,17 @@ os.environ.setdefault("HF_HUB_CACHE", str(MODEL_HOME / "hub"))
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from asr_adapters import ParaformerAdapter, split_model_identifier  # noqa: E402
-from feedback_learning import process_feedback  # noqa: E402
+from asr_adapters import (  # noqa: E402
+    ParaformerAdapter,
+    resolve_catalog_adapter,
+    split_model_identifier,
+)
+from feedback_learning import (  # noqa: E402
+    list_learning_rules,
+    process_feedback,
+    rollback_learning_rule,
+)
+from feedback_store import FeedbackStore  # noqa: E402
 from glossary import (  # noqa: E402
     GlossaryEntry,
     apply_glossary_corrections,
@@ -49,6 +58,7 @@ MODEL_SOURCE: str | None = None
 MODEL_BACKEND, MODEL_BACKEND_NAME = split_model_identifier(MODEL_NAME)
 PARAFORMER_ADAPTER: ParaformerAdapter | None = None
 HOTWORD_CATALOG_REPORT = PROJECT_DIR / "runtime" / "hotword-catalog-report.json"
+LEARNING_STORE: FeedbackStore | None = None
 
 
 def emit(payload: dict) -> None:
@@ -86,20 +96,15 @@ def selected_terms() -> list[str]:
     return selected
 
 
-def load_recent_terms() -> dict[str, int]:
-    path = user_file("hotword-usage.json", fallback_in_project=False)
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        values = payload.get("accepted_terms", payload) if isinstance(payload, dict) else {}
-        return {
-            str(key): max(0, int(value))
-            for key, value in values.items()
-            if isinstance(value, (int, float, str))
-        }
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return {}
+def learning_store() -> FeedbackStore:
+    global LEARNING_STORE
+    if LEARNING_STORE is None:
+        LEARNING_STORE = FeedbackStore(user_file("glossary.tsv", fallback_in_project=False).parent)
+    return LEARNING_STORE
+
+
+def load_recent_terms() -> dict[str, float]:
+    return learning_store().recent_terms()
 
 
 def request_context(request: dict) -> str:
@@ -149,17 +154,47 @@ def requested_hotword_limit(request: dict) -> int:
         return 16
 
 
+def configured_catalog_models() -> tuple[str, ...]:
+    """Return locally configured final models in priority order."""
+    candidates: list[str] = []
+    if MODEL_BACKEND == "paraformer":
+        candidates.append(MODEL_NAME)
+    paths = [
+        user_file("model-config.json", fallback_in_project=False),
+        PROJECT_DIR / "model-config.json",
+    ]
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for key in ("final_model", "model"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+    return tuple(dict.fromkeys(candidates))
+
+
 def refresh_hotword_catalog(request_id: int = 0) -> dict:
     glossary = load_glossary(user_file("glossary.tsv", fallback_in_project=False))
-    if PARAFORMER_ADAPTER is None:
-        HOTWORD_CATALOG_REPORT.unlink(missing_ok=True)
+    adapter = (
+        PARAFORMER_ADAPTER
+        if PARAFORMER_ADAPTER is not None
+        and PARAFORMER_ADAPTER.is_seaco
+        and PARAFORMER_ADAPTER.seg_dict_path.is_file()
+        else resolve_catalog_adapter(PROJECT_DIR, configured_catalog_models())
+    )
+    if adapter is None:
         return {
             "id": request_id,
             "event": "hotword_catalog_refreshed",
             "supported": False,
             "entries": len(glossary),
+            "error": "未找到本地 SeACo seg_dict",
         }
-    summary = PARAFORMER_ADAPTER.refresh_hotword_catalog(glossary)
+    summary = adapter.refresh_hotword_catalog(glossary)
     return {
         "id": request_id,
         "event": "hotword_catalog_refreshed",
@@ -191,6 +226,30 @@ def feedback_request(request: dict) -> dict:
         "accepted_unchanged": bool(event.get("accepted_unchanged")),
         "observed": event.get("observed", []),
         "activated": event.get("activated", []),
+    }
+
+
+def learning_rules_request(request_id: int) -> dict:
+    glossary_path = user_file("glossary.tsv", fallback_in_project=False)
+    return {
+        "id": request_id,
+        "event": "learning_rules_listed",
+        "rules": list_learning_rules(glossary_path.parent),
+    }
+
+
+def rollback_learning_rule_request(request: dict) -> dict:
+    glossary_path = user_file("glossary.tsv", fallback_in_project=False)
+    event = rollback_learning_rule(
+        rule_id=int(request.get("rule_id", 0)),
+        entries=load_glossary(glossary_path),
+        glossary_path=glossary_path,
+        user_data_dir=glossary_path.parent,
+    )
+    return {
+        "id": int(request.get("id", 0)),
+        "event": "learning_rule_reverted",
+        "rule_id": event["rule_id"],
     }
 
 
@@ -377,6 +436,8 @@ def transcribe_request(request: dict) -> dict:
             text, changes = apply_glossary_corrections(normalized_text, active_entries)
         else:
             text, changes = apply_corrections(normalized_text, user_file("corrections.tsv"))
+    if final and changes:
+        learning_store().record_rule_hits(changes)
     client_text = text if final or SAFE_LIVE_DRAFT else ""
     return {
         "id": request_id,
@@ -405,6 +466,14 @@ def transcribe_request(request: dict) -> dict:
 
 def main() -> int:
     global MODEL_SOURCE, PARAFORMER_ADAPTER
+    if "--refresh-catalog-only" in sys.argv[1:]:
+        try:
+            result = refresh_hotword_catalog()
+            emit(result)
+            return 0 if result.get("supported") else 1
+        except Exception as exc:
+            emit({"event": "fatal", "error": str(exc)})
+            return 1
     try:
         if MODEL_BACKEND == "paraformer":
             PARAFORMER_ADAPTER = ParaformerAdapter(PROJECT_DIR, MODEL_BACKEND_NAME, role=MODEL_ROLE)
@@ -447,6 +516,12 @@ def main() -> int:
                 return 0
             if request.get("command") == "feedback":
                 emit(feedback_request(request))
+                continue
+            if request.get("command") == "list_learning_rules":
+                emit(learning_rules_request(request_id))
+                continue
+            if request.get("command") == "rollback_learning_rule":
+                emit(rollback_learning_rule_request(request))
                 continue
             if request.get("command") == "refresh_hotword_catalog":
                 emit(refresh_hotword_catalog(request_id))

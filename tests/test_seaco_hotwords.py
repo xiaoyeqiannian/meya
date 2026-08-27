@@ -14,6 +14,7 @@ from glossary import GlossaryEntry, apply_glossary_corrections  # noqa: E402
 from seaco_hotwords import (  # noqa: E402
     analyze_form,
     compile_glossary,
+    pronunciation_suggestions,
     seaco_tokens,
     write_compilation_report,
 )
@@ -77,19 +78,62 @@ def main() -> int:
         payload = json.loads(report.read_text(encoding="utf-8"))
         assert payload["summary"]["effective_entries"] == 2
         assert payload["summary"]["unknown_entries"] == 1
+        assert "pronunciation_suggestions" in payload["entries"][1]
+
+        suggestion_characters = set("玻尔科博瑞姆库伯内蒂斯凯优比伊阿恩提艾")
+        suggestion_dict = {character: (character,) for character in suggestion_characters}
+        compound = pronunciation_suggestions(
+            "bohrium-core",
+            ("玻尔core",),
+            suggestion_dict,
+        )
+        assert compound[0] == "玻尔科尔"
+        assert 1 <= len(compound) <= 3
+        assert all(
+            analyze_form(value, "suggestion", suggestion_dict).status == "effective"
+            for value in compound
+        )
+        kubernetes = pronunciation_suggestions("Kubernetes", (), suggestion_dict)
+        assert kubernetes[0] == "库伯内蒂斯"
 
     actual = (
         Path(__file__).resolve().parents[1]
         / "models/paraformer/iic--speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/seg_dict"
     )
     if actual.exists():
+        live_entries = [
+            GlossaryEntry("main"),
+            GlossaryEntry("NovaKit"),
+            GlossaryEntry("K8s"),
+            GlossaryEntry("bohrium-core", ("玻尔core",)),
+            GlossaryEntry("OpenKruise"),
+            GlossaryEntry("SDBX"),
+            GlossaryEntry("ECI"),
+            GlossaryEntry("BuildKit"),
+            GlossaryEntry("Dockerfile"),
+            GlossaryEntry("containerd"),
+            GlossaryEntry("overlayfs"),
+            GlossaryEntry("snapshotter"),
+            GlossaryEntry("Kubernetes"),
+            GlossaryEntry("OpenAPI"),
+            GlossaryEntry("CI/CD"),
+            GlossaryEntry("GitLab"),
+            GlossaryEntry("Grafana"),
+            GlossaryEntry("阿里 AKS"),
+            GlossaryEntry("nacos"),
+        ]
         live = compile_glossary(
-            [GlossaryEntry("main"), GlossaryEntry("NovaKit"), GlossaryEntry("K8s")],
+            live_entries,
             actual,
         )
         statuses = {entry.canonical: entry.status for entry in live.entries}
-        assert statuses == {"main": "effective", "NovaKit": "unknown", "K8s": "effective"}
+        assert statuses["main"] == "effective"
+        assert statuses["NovaKit"] == "unknown"
+        assert statuses["K8s"] == "effective"
         assert "k 八 s" in live.selected_hotwords
+        unresolved = [entry for entry in live.entries if entry.status != "effective"]
+        assert unresolved
+        assert all(1 <= len(entry.pronunciation_suggestions) <= 3 for entry in unresolved)
 
     print("SeACo hotword compiler tests passed")
     return 0

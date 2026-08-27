@@ -9,9 +9,9 @@ from difflib import SequenceMatcher
 import json
 from pathlib import Path
 import re
-import tempfile
 from typing import Any
 
+from feedback_store import FeedbackStore
 from glossary import GlossaryEntry, add_variant, serialize_glossary
 from hotword_selector import entry_forms
 
@@ -141,32 +141,6 @@ def accepted_terms(text: str, entries: list[GlossaryEntry]) -> list[str]:
     return [entry.canonical for entry in entries if _contains(text, entry.canonical)]
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=path.name + ".",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-        temporary = Path(handle.name)
-    temporary.replace(path)
-
-
 def _append_event(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -187,6 +161,7 @@ def process_feedback(
     explicit: bool = False,
 ) -> dict[str, Any]:
     """Persist local evidence and activate a mistake only after two confirmations."""
+    store = FeedbackStore(user_data_dir)
     unchanged = expected == edited
     replacements = [] if unchanged else infer_replacements(
         expected,
@@ -194,26 +169,18 @@ def process_feedback(
         entries,
         include_new_terms=explicit,
     )
-    candidate_path = user_data_dir / "feedback-candidates.json"
-    candidate_payload = _read_json(candidate_path)
-    candidates = candidate_payload.get("candidates", {})
-    if not isinstance(candidates, dict):
-        candidates = {}
     activated: list[LearnedCandidate] = []
     observed: list[LearnedCandidate] = []
     updated_entries = list(entries)
     for source, canonical in replacements:
-        key = canonical.casefold() + "\t" + source.casefold()
-        previous = candidates.get(key, {}) if isinstance(candidates.get(key), dict) else {}
-        count = max(0, int(previous.get("confirmations", 0))) + 1
-        is_active = explicit or count >= ACTIVATION_CONFIRMATIONS
-        candidates[key] = {
-            "canonical": canonical,
-            "observed": source,
-            "confirmations": count,
-            "activated": is_active,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
+        rule = store.observe_rule(
+            canonical,
+            source,
+            explicit=explicit,
+            activation_confirmations=ACTIVATION_CONFIRMATIONS,
+        )
+        count = int(rule["confirmations"])
+        is_active = bool(rule["activated"])
         item = LearnedCandidate(canonical, source, count, is_active)
         observed.append(item)
         if is_active:
@@ -223,24 +190,19 @@ def process_feedback(
             )
             existing = {value.casefold() for value in entry_forms(entry)} if entry else set()
             if source.casefold() not in existing:
+                owns_canonical = entry is None
                 updated_entries = add_variant(updated_entries, canonical, source, kind="mistake")
+                store.mark_glossary_ownership(
+                    int(rule["id"]),
+                    variant=True,
+                    canonical=owns_canonical,
+                )
                 activated.append(item)
     if updated_entries != entries:
         glossary_path.write_text(serialize_glossary(updated_entries), encoding="utf-8")
-    _atomic_json(
-        candidate_path,
-        {"schema_version": 1, "activation_confirmations": ACTIVATION_CONFIRMATIONS, "candidates": candidates},
-    )
-
-    usage_path = user_data_dir / "hotword-usage.json"
-    usage_payload = _read_json(usage_path)
-    usage = usage_payload.get("accepted_terms", {})
-    if not isinstance(usage, dict):
-        usage = {}
     if unchanged:
         for canonical in accepted_terms(final_text, updated_entries):
-            usage[canonical] = max(0, int(usage.get(canonical, 0))) + 1
-    _atomic_json(usage_path, {"schema_version": 1, "accepted_terms": usage})
+            store.accept_term(canonical)
 
     # Persist only the minimal learning evidence. Full recognition text, audio
     # paths, and focused-application names remain transient in the worker.
@@ -251,6 +213,54 @@ def process_feedback(
         "explicit": explicit,
         "observed": [asdict(item) for item in observed],
         "activated": [asdict(item) for item in activated],
+    }
+    _append_event(user_data_dir / "feedback-events.jsonl", event)
+    return event
+
+
+def list_learning_rules(user_data_dir: Path) -> list[dict[str, Any]]:
+    """Return review-safe learned-rule evidence without retained utterance text."""
+    return FeedbackStore(user_data_dir).list_rules()
+
+
+def rollback_learning_rule(
+    *,
+    rule_id: int,
+    entries: list[GlossaryEntry],
+    glossary_path: Path,
+    user_data_dir: Path,
+) -> dict[str, Any]:
+    """Revert one learned mapping while preserving manually-owned glossary data."""
+    store = FeedbackStore(user_data_dir)
+    rule = store.get_rule(rule_id)
+    if rule is None:
+        raise ValueError("学习规则不存在或已撤销")
+    updated_entries = list(entries)
+    if bool(rule["owns_glossary_variant"]):
+        canonical_key = str(rule["canonical_key"])
+        observed_key = str(rule["observed_key"])
+        for index, entry in enumerate(updated_entries):
+            if entry.canonical.casefold() != canonical_key:
+                continue
+            mistakes = tuple(value for value in entry.mistakes if value.casefold() != observed_key)
+            updated_entries[index] = GlossaryEntry(entry.canonical, entry.aliases, mistakes)
+            if (
+                bool(rule["owns_glossary_canonical"])
+                and not updated_entries[index].aliases
+                and not updated_entries[index].mistakes
+            ):
+                updated_entries.pop(index)
+            break
+    if updated_entries != entries:
+        glossary_path.write_text(serialize_glossary(updated_entries), encoding="utf-8")
+    store.mark_reverted(rule_id)
+    event = {
+        "schema_version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "event": "rule_reverted",
+        "rule_id": rule_id,
+        "canonical": rule["canonical"],
+        "observed": rule["observed"],
     }
     _append_event(user_data_dir / "feedback-events.jsonl", event)
     return event

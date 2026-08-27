@@ -1078,6 +1078,12 @@ private struct HotwordReport: Decodable {
     struct Entry: Decodable {
         let canonical: String
         let status: String
+        let pronunciationSuggestions: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case canonical, status
+            case pronunciationSuggestions = "pronunciation_suggestions"
+        }
     }
 
     let summary: Summary
@@ -1087,20 +1093,25 @@ private struct HotwordReport: Decodable {
 private final class KeywordLibraryController: NSObject, NSWindowDelegate,
     NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private let projectDirectory: URL
-    private let onGlossarySaved: () -> Void
+    private let onGlossarySaved: (@escaping (Result<Void, Error>) -> Void) -> Void
     private var window: NSWindow!
     private let tableView = NSTableView()
     private var rows: [GlossaryRow] = []
     private var hotwordStatuses: [String: String] = [:]
+    private var hotwordSuggestions: [String: [String]] = [:]
     private var hotwordSummary: HotwordReport.Summary?
     private let statusLabel = NSTextField(labelWithString: "")
     private let saveButton = NSButton(title: "保存并立即生效", target: nil, action: nil)
     private let canonicalColumn = NSUserInterfaceItemIdentifier("canonical")
     private let aliasesColumn = NSUserInterfaceItemIdentifier("aliases")
     private let mistakesColumn = NSUserInterfaceItemIdentifier("mistakes")
+    private let suggestionsColumn = NSUserInterfaceItemIdentifier("pronunciationSuggestions")
     private let statusColumn = NSUserInterfaceItemIdentifier("hotwordStatus")
 
-    init(projectDirectory: URL, onGlossarySaved: @escaping () -> Void) {
+    init(
+        projectDirectory: URL,
+        onGlossarySaved: @escaping (@escaping (Result<Void, Error>) -> Void) -> Void
+    ) {
         self.projectDirectory = projectDirectory
         self.onGlossarySaved = onGlossarySaved
         super.init()
@@ -1134,13 +1145,13 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
 
     private func buildWindow() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 1_160, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "麦芽 Meya · 个人词库"
-        window.minSize = NSSize(width: 820, height: 440)
+        window.minSize = NSSize(width: 980, height: 440)
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.center()
@@ -1164,9 +1175,10 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
         tableView.rowHeight = 28
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         let columns: [(NSUserInterfaceItemIdentifier, String, CGFloat)] = [
-            (canonicalColumn, "标准写法", 175),
-            (aliasesColumn, "实际发音形式", 250),
-            (mistakesColumn, "少量兜底错词", 270),
+            (canonicalColumn, "标准写法", 165),
+            (aliasesColumn, "实际发音形式", 210),
+            (mistakesColumn, "少量兜底错词", 220),
+            (suggestionsColumn, "建议发音（点击采纳）", 300),
             (statusColumn, "热词状态", 120),
         ]
         for (identifier, title, width) in columns {
@@ -1264,6 +1276,9 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
         row: Int
     ) -> NSView? {
         guard let tableColumn, rows.indices.contains(row) else { return nil }
+        if tableColumn.identifier == suggestionsColumn {
+            return suggestionCell(row: row)
+        }
         let cell = NSTableCellView()
         let field = NSTextField()
         field.isBordered = false
@@ -1308,6 +1323,58 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
             field.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
+    }
+
+    private func suggestionCell(row: Int) -> NSView {
+        let cell = NSTableCellView()
+        let key = rows[row].canonical.lowercased()
+        let existing = Set(normalizedVariants(rows[row].aliases).map { $0.lowercased() })
+        let suggestions = (hotwordSuggestions[key] ?? []).enumerated().filter {
+            !existing.contains($0.element.lowercased())
+        }
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 4
+        if suggestions.isEmpty {
+            let label = NSTextField(labelWithString: "—")
+            label.textColor = .tertiaryLabelColor
+            stack.addArrangedSubview(label)
+        } else {
+            for (index, suggestion) in suggestions.prefix(3) {
+                let button = NSButton(
+                    title: suggestion,
+                    target: self,
+                    action: #selector(acceptSuggestion(_:))
+                )
+                button.bezelStyle = .recessed
+                button.controlSize = .small
+                button.font = .systemFont(ofSize: 11)
+                button.tag = row * 10 + index
+                button.toolTip = "采纳“\(suggestion)”到实际发音形式；保存后才会生效"
+                stack.addArrangedSubview(button)
+            }
+        }
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -6),
+            stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    @objc private func acceptSuggestion(_ sender: NSButton) {
+        let row = sender.tag / 10
+        let index = sender.tag % 10
+        guard rows.indices.contains(row) else { return }
+        let key = rows[row].canonical.lowercased()
+        guard let suggestions = hotwordSuggestions[key], suggestions.indices.contains(index) else { return }
+        rows[row].aliases = mergeVariants(rows[row].aliases, suggestions[index])
+        window.isDocumentEdited = true
+        tableView.reloadData()
+        updateStatus(summary(for: normalizedRows(rows)))
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -1398,8 +1465,32 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
             rows = normalized
             tableView.reloadData()
             window.isDocumentEdited = false
-            onGlossarySaved()
-            window.close()
+            saveButton.isEnabled = false
+            saveButton.title = "正在检测…"
+            statusLabel.textColor = .secondaryLabelColor
+            updateStatus("词库已保存，正在重新编译热词状态…")
+            onGlossarySaved { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.saveButton.isEnabled = true
+                    switch result {
+                    case .success:
+                        self.loadHotwordReport()
+                        self.tableView.reloadData()
+                        self.statusLabel.textColor = .systemGreen
+                        self.updateStatus("已保存并生效 · \(self.summary(for: self.rows))")
+                        self.saveButton.title = "✓ 已生效"
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                            self?.resetSaveButton()
+                        }
+                    case .failure(let error):
+                        self.statusLabel.textColor = .systemRed
+                        self.updateStatus("词库已保存，但热词检测失败：\(error.localizedDescription)")
+                        self.resetSaveButton()
+                        NSSound.beep()
+                    }
+                }
+            }
         } catch {
             statusLabel.textColor = .systemRed
             updateStatus("保存失败：\(error.localizedDescription)")
@@ -1533,6 +1624,7 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
 
     private func loadHotwordReport() {
         hotwordStatuses = [:]
+        hotwordSuggestions = [:]
         hotwordSummary = nil
         guard let data = try? Data(contentsOf: hotwordReportURL),
               let report = try? JSONDecoder().decode(HotwordReport.self, from: data)
@@ -1540,6 +1632,9 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
         hotwordSummary = report.summary
         hotwordStatuses = Dictionary(uniqueKeysWithValues: report.entries.map {
             ($0.canonical.lowercased(), $0.status)
+        })
+        hotwordSuggestions = Dictionary(uniqueKeysWithValues: report.entries.map {
+            ($0.canonical.lowercased(), $0.pronunciationSuggestions ?? [])
         })
     }
 
@@ -2002,6 +2097,25 @@ private struct FeedbackCandidateResponse: Decodable {
     let activated: Bool
 }
 
+private struct LearningRuleResponse: Decodable {
+    let id: Int
+    let canonical: String
+    let observed: String
+    let confirmations: Int
+    let activated: Bool
+    let hitCount: Int
+    let updatedAt: String
+    let lastHitAt: String?
+    let evidence: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, canonical, observed, confirmations, activated, evidence
+        case hitCount = "hit_count"
+        case updatedAt = "updated_at"
+        case lastHitAt = "last_hit_at"
+    }
+}
+
 private struct ASRResponse: Decodable {
     let id: Int?
     let event: String?
@@ -2024,6 +2138,9 @@ private struct ASRResponse: Decodable {
     let acceptedUnchanged: Bool?
     let observed: [FeedbackCandidateResponse]?
     let activated: [FeedbackCandidateResponse]?
+    let rules: [LearningRuleResponse]?
+    let ruleID: Int?
+    let supported: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id, event, final, text, error, model, role, refined, silence, revision, language
@@ -2035,7 +2152,8 @@ private struct ASRResponse: Decodable {
         case tailText = "tail_text"
         case lastHypothesis = "last_hypothesis"
         case acceptedUnchanged = "accepted_unchanged"
-        case observed, activated
+        case observed, activated, rules, supported
+        case ruleID = "rule_id"
     }
 }
 
@@ -2236,6 +2354,58 @@ private final class ASRService {
                         domain: "LocalVoiceInput.ASR",
                         code: 5,
                         userInfo: [NSLocalizedDescriptionKey: "学习请求超时，请重试"]
+                    )))
+                }
+            }
+        }
+    }
+
+    func listLearningRules(completion: @escaping Completion) {
+        sendLearningCommand("list_learning_rules", completion: completion)
+    }
+
+    func rollbackLearningRule(id: Int, completion: @escaping Completion) {
+        sendLearningCommand("rollback_learning_rule", ruleID: id, completion: completion)
+    }
+
+    private func sendLearningCommand(
+        _ command: String,
+        ruleID: Int? = nil,
+        completion: @escaping Completion
+    ) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.process.isRunning else {
+                DispatchQueue.main.async {
+                    completion(.failure(NSError(
+                        domain: "LocalVoiceInput.ASR",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "学习服务未运行"]
+                    )))
+                }
+                return
+            }
+            let id = self.nextID
+            self.nextID += 1
+            self.pending[id] = completion
+            var request: [String: Any] = ["id": id, "command": command]
+            if let ruleID { request["rule_id"] = ruleID }
+            do {
+                var data = try JSONSerialization.data(withJSONObject: request)
+                data.append(0x0A)
+                try self.inputPipe.fileHandleForWriting.write(contentsOf: data)
+            } catch {
+                self.pending.removeValue(forKey: id)
+                DispatchQueue.main.async { completion(.failure(error)) }
+                return
+            }
+            self.queue.asyncAfter(deadline: .now() + 10) { [weak self] in
+                guard let self, let expired = self.pending.removeValue(forKey: id) else { return }
+                DispatchQueue.main.async {
+                    expired(.failure(NSError(
+                        domain: "LocalVoiceInput.ASR",
+                        code: 5,
+                        userInfo: [NSLocalizedDescriptionKey: "学习规则请求超时"]
                     )))
                 }
             }
@@ -3094,9 +3264,11 @@ final class LocalVoiceInputController: IMKInputController {
 }
 
 private enum LivePreview {
-    static let minPartialSamples = 16_000
-    static let partialPollInterval = 0.55
-    static let firstPartialDelay = 0.9
+    // Start warming the streaming cache after 500 ms. Requests remain
+    // serialized, so the 200 ms timer coalesces while inference is busy.
+    static let minPartialSamples = 8_000
+    static let partialPollInterval = 0.2
+    static let firstPartialDelay = 0.15
 }
 
 private enum RollingWindow {
@@ -3126,6 +3298,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var refineService: ASRService?
     private var statusItem: NSStatusItem!
     private var functionKeyStatusItem: NSMenuItem!
+    private var learnLastCorrectionItem: NSMenuItem!
     private var modelStatusText = "识别服务正在加载…"
     private var partialTimer: Timer?
     private var partialInFlight = false
@@ -3214,34 +3387,54 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         let menu = NSMenu()
         menu.delegate = self
-        let modelManagerItem = NSMenuItem(title: "管理识别模型…", action: #selector(openModelManager), keyEquivalent: "")
-        modelManagerItem.target = self
-        menu.addItem(modelManagerItem)
-
-        functionKeyStatusItem = NSMenuItem(title: "Fn 长按：输入法内监听已就绪", action: nil, keyEquivalent: "")
+        functionKeyStatusItem = NSMenuItem(title: "○ 麦芽正在加载…", action: nil, keyEquivalent: "")
         functionKeyStatusItem.isEnabled = false
         menu.addItem(functionKeyStatusItem)
-
-        let permissionItem = NSMenuItem(title: "重新打开 Fn 权限设置…", action: #selector(openFunctionKeyPermissionSettings), keyEquivalent: "")
-        permissionItem.target = self
-        menu.addItem(permissionItem)
-
-        let restartItem = NSMenuItem(title: "我已授权，重启麦芽", action: #selector(restartForFunctionKeyPermissions), keyEquivalent: "")
-        restartItem.target = self
-        menu.addItem(restartItem)
         menu.addItem(.separator())
+
+        learnLastCorrectionItem = NSMenuItem(
+            title: "暂无可学习的修改",
+            action: #selector(learnLastCorrection),
+            keyEquivalent: ""
+        )
+        learnLastCorrectionItem.target = self
+        learnLastCorrectionItem.isEnabled = false
+        menu.addItem(learnLastCorrectionItem)
 
         let termsItem = NSMenuItem(title: "管理个人词库…", action: #selector(openTerms), keyEquivalent: "")
         termsItem.target = self
         menu.addItem(termsItem)
 
-        let learnItem = NSMenuItem(title: "学习刚才的修改", action: #selector(learnLastCorrection), keyEquivalent: "")
-        learnItem.target = self
-        menu.addItem(learnItem)
+        let modelManagerItem = NSMenuItem(title: "管理识别模型…", action: #selector(openModelManager), keyEquivalent: "")
+        modelManagerItem.target = self
+        menu.addItem(modelManagerItem)
+        menu.addItem(.separator())
+
+        let moreItem = NSMenuItem(title: "更多", action: nil, keyEquivalent: "")
+        let moreMenu = NSMenu(title: "更多")
+
+        let reviewLearningItem = NSMenuItem(
+            title: "管理已学规则…",
+            action: #selector(reviewLearningRules),
+            keyEquivalent: ""
+        )
+        reviewLearningItem.target = self
+        moreMenu.addItem(reviewLearningItem)
 
         let folderItem = NSMenuItem(title: "打开录音目录…", action: #selector(openRecordings), keyEquivalent: "")
         folderItem.target = self
-        menu.addItem(folderItem)
+        moreMenu.addItem(folderItem)
+        moreMenu.addItem(.separator())
+
+        let diagnosticsItem = NSMenuItem(
+            title: "权限与诊断…",
+            action: #selector(showPermissionDiagnostics),
+            keyEquivalent: ""
+        )
+        diagnosticsItem.target = self
+        moreMenu.addItem(diagnosticsItem)
+        moreItem.submenu = moreMenu
+        menu.addItem(moreItem)
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "退出麦芽 Meya", action: #selector(quit), keyEquivalent: "q")
@@ -3255,6 +3448,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         // action. The action can then compare it with the retained ASR result
         // directly, without asking the user to type the correction twice.
         liveDraftInserter.captureCurrentFeedbackEdit()
+        let canLearn = liveDraftInserter.hasPendingFeedback
+        learnLastCorrectionItem?.title = canLearn
+            ? "学习刚才的修改"
+            : "暂无可学习的修改"
+        learnLastCorrectionItem?.isEnabled = canLearn
+        refreshFunctionKeyStatus()
     }
 
     private func setStatusIcon(description: String) {
@@ -3266,17 +3465,64 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let hasAccessibility = AXIsProcessTrusted()
         guard !hasInputMonitoring || !hasAccessibility else { return }
 
-        functionKeyStatusItem?.title = "Fn 不可用：当前进程还没拿到系统权限"
+        functionKeyStatusItem?.title = "⚠ Fn 不可用 · 请检查权限"
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
         let promptKey = "permissionsPromptedVersion"
         guard UserDefaults.standard.string(forKey: promptKey) != version else { return }
         UserDefaults.standard.set(version, forKey: promptKey)
 
         overlay.show(
-            status: "请再勾选一次当前这份麦芽",
-            text: "设置页勾上了也不够：系统把权限记在旧签名上，这份进程对不上。请只保留输入法目录里这一份麦芽，重新打开输入监控和辅助功能，然后菜单选「我已授权，重启麦芽」。"
+            status: "请允许麦芽使用 Fn 输入",
+            text: "请在系统设置中允许输入监控和辅助功能。授权后麦芽会自动检测并恢复，无需重启。"
         )
         openFunctionKeyPermissionSettings()
+    }
+
+    @objc private func showPermissionDiagnostics() {
+        let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        let hasMicrophone = microphoneStatus == .authorized
+        let hasInputMonitoring = CGPreflightListenEventAccess()
+        let hasAccessibility = AXIsProcessTrusted()
+        let tapEnabled = functionKeyEventTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        let mark: (Bool) -> String = { $0 ? "✓ 已允许" : "✕ 未允许" }
+
+        let alert = NSAlert()
+        alert.alertStyle = hasMicrophone && hasInputMonitoring && hasAccessibility ? .informational : .warning
+        alert.messageText = "麦芽权限与诊断"
+        alert.informativeText = """
+        麦克风：\(mark(hasMicrophone))
+        输入监控：\(mark(hasInputMonitoring))
+        辅助功能：\(mark(hasAccessibility))
+        Fn 监听：\(tapEnabled ? "✓ 已就绪" : "○ 备用监听/等待权限")
+
+        版本：v\(version)
+        授权变化会自动检测，无需重启麦芽。
+        """
+        alert.addButton(withTitle: "麦克风设置")
+        alert.addButton(withTitle: "输入权限设置")
+        alert.addButton(withTitle: "关闭")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            openMicrophonePermissionSettings()
+        case .alertSecondButtonReturn:
+            openFunctionKeyPermissionSettings()
+        default:
+            break
+        }
+    }
+
+    private func openMicrophonePermissionSettings() {
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            return
+        }
+        if let microphoneURL = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        ) {
+            NSWorkspace.shared.open(microphoneURL)
+        }
     }
 
     @objc private func openFunctionKeyPermissionSettings() {
@@ -3290,10 +3536,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 NSWorkspace.shared.open(monitoringURL)
             }
         }
-    }
-
-    @objc private func restartForFunctionKeyPermissions() {
-        NSApp.terminate(nil)
     }
 
     private func requestMicrophonePermissionOnLaunch() {
@@ -3414,15 +3656,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let hasAccessibility = AXIsProcessTrusted()
         let tapEnabled = functionKeyEventTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
         let state: String
-        if tapEnabled {
-            functionKeyStatusItem?.title = "麦芽 Meya Fn 语音：已启用（长按录音）"
-            state = "event_tap_enabled"
-        } else if hasInputMonitoring || hasAccessibility {
-            functionKeyStatusItem?.title = "Fn 备用监听已开：长按录音（短按仍交给系统）"
-            state = "monitor_enabled"
-        } else {
-            functionKeyStatusItem?.title = "Fn 不可用：系统权限未落到当前进程"
+        if !hasInputMonitoring && !hasAccessibility {
+            functionKeyStatusItem?.title = "⚠ Fn 不可用 · 请检查权限"
             state = "waiting_for_permissions"
+        } else if !asrReady {
+            functionKeyStatusItem?.title = "○ 麦芽正在加载识别模型…"
+            state = "model_loading"
+        } else if tapEnabled {
+            functionKeyStatusItem?.title = "● 麦芽已就绪 · 长按 Fn 输入"
+            state = "event_tap_enabled"
+        } else {
+            functionKeyStatusItem?.title = "● 麦芽可用 · 长按 Fn 输入"
+            state = "monitor_enabled"
         }
         writeFunctionKeyDiagnostic(
             state: state,
@@ -3878,6 +4123,65 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         showManualLearningDialog()
     }
 
+    @objc private func reviewLearningRules() {
+        guard let service = previewService ?? refineService else {
+            overlay.show(status: "学习服务未就绪", text: "请稍后重试")
+            return
+        }
+        service.listLearningRules { [weak self, weak service] result in
+            guard let self, let service else { return }
+            switch result {
+            case .success(let response):
+                self.showLearningRules(response.rules ?? [], service: service)
+            case .failure(let error):
+                self.overlay.show(status: "读取已学规则失败", text: error.localizedDescription)
+            }
+        }
+    }
+
+    private func showLearningRules(_ rules: [LearningRuleResponse], service: ASRService) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "已学规则"
+        guard !rules.isEmpty else {
+            alert.informativeText = "还没有从修改中提取出学习规则。"
+            alert.addButton(withTitle: "好")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+        alert.informativeText = "每条都显示触发证据、确认次数和实际命中次数。撤销只移除该条自动学习映射。"
+        alert.addButton(withTitle: "撤销选中规则")
+        alert.addButton(withTitle: "完成")
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 560, height: 30))
+        for rule in rules {
+            let state = rule.activated ? "已生效" : "待确认"
+            let lastActivity = (rule.lastHitAt ?? rule.updatedAt).split(separator: "T").first.map(String.init) ?? "-"
+            popup.addItem(withTitle: "\(rule.observed) → \(rule.canonical)  · \(state) · \(rule.evidence) · 命中 \(rule.hitCount) 次 · \(lastActivity)")
+            popup.lastItem?.representedObject = rule.id
+            popup.lastItem?.toolTip = "触发证据：\(rule.observed) → \(rule.canonical)"
+        }
+        alert.accessoryView = popup
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let ruleID = popup.selectedItem?.representedObject as? Int,
+              let selected = rules.first(where: { $0.id == ruleID })
+        else { return }
+        service.rollbackLearningRule(id: ruleID) { [weak self] result in
+            switch result {
+            case .success:
+                self?.overlay.show(
+                    status: "已撤销学习规则",
+                    text: "\(selected.observed) → \(selected.canonical)"
+                )
+                self?.refreshHotwordCatalog()
+            case .failure(let error):
+                self?.overlay.show(status: "撤销失败", text: error.localizedDescription)
+            }
+        }
+    }
+
     private func showManualLearningDialog() {
         guard let texts = liveDraftInserter.feedbackDialogTexts() else { return }
         let alert = NSAlert()
@@ -3982,22 +4286,98 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if keywordLibraryController == nil {
             keywordLibraryController = KeywordLibraryController(
                 projectDirectory: projectDirectory
-            ) { [weak self] in
-                self?.refreshHotwordCatalog()
+            ) { [weak self] completion in
+                guard let self else {
+                    completion(.failure(NSError(
+                        domain: "LocalVoiceInput.HotwordCatalog",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "应用已关闭"]
+                    )))
+                    return
+                }
+                self.refreshHotwordCatalog(completion: completion)
             }
         }
         keywordLibraryController?.show()
         refreshHotwordCatalog()
     }
 
-    private func refreshHotwordCatalog() {
-        guard let service = refineService ?? previewService else { return }
+    private func refreshHotwordCatalog(
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        let service = (finalModelReady ? refineService : nil) ?? (asrReady ? previewService : nil)
+        guard let service else {
+            refreshHotwordCatalogOffline(completion: completion)
+            return
+        }
         service.refreshHotwordCatalog { [weak self] result in
             switch result {
-            case .success:
+            case .success(let response) where response.supported != false:
                 self?.keywordLibraryController?.refreshHotwordStatuses()
+                completion?(.success(()))
+            case .success(let response):
+                let error = NSError(
+                    domain: "LocalVoiceInput.HotwordCatalog",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: response.error ?? "未找到本地 SeACo 词典"]
+                )
+                NSLog("完整热词检测刷新失败: %@", error.localizedDescription)
+                self?.refreshHotwordCatalogOffline(completion: completion)
             case .failure(let error):
                 NSLog("完整热词检测刷新失败: %@", error.localizedDescription)
+                self?.refreshHotwordCatalogOffline(completion: completion)
+            }
+        }
+    }
+
+    private func refreshHotwordCatalogOffline(
+        completion: ((Result<Void, Error>) -> Void)?
+    ) {
+        let projectDirectory = self.projectDirectory
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            process.executableURL = projectDirectory.appendingPathComponent(".venv/bin/python")
+            process.arguments = [
+                "-u",
+                projectDirectory.appendingPathComponent("asr_daemon.py").path,
+                "--refresh-catalog-only",
+            ]
+            process.currentDirectoryURL = projectDirectory
+            var environment = ProcessInfo.processInfo.environment
+            environment["HF_HUB_OFFLINE"] = "1"
+            environment["MEYA_USER_DATA"] = UserDataStore.directory.path
+            process.environment = environment
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
+            let result: Result<Void, Error>
+            do {
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationStatus == 0 {
+                    result = .success(())
+                } else {
+                    let stderr = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    let stdout = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    let message = String(data: stderr.isEmpty ? stdout : stderr, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    result = .failure(NSError(
+                        domain: "LocalVoiceInput.HotwordCatalog",
+                        code: Int(process.terminationStatus),
+                        userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false
+                            ? message!
+                            : "本地热词检测进程失败"]
+                    ))
+                }
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                if case .success = result {
+                    self?.keywordLibraryController?.refreshHotwordStatuses()
+                }
+                completion?(result)
             }
         }
     }
@@ -4038,6 +4418,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             final: finalModelName,
             finalReady: finalModelReady
         )
+        refreshFunctionKeyStatus()
     }
 
     private func startASRServices(selection: ModelSelection) {

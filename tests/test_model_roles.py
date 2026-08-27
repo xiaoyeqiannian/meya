@@ -71,6 +71,14 @@ def main() -> int:
     if 'request.get("command") == "refresh_hotword_catalog"' not in daemon_source:
         print("FAIL: final worker must support refreshing the complete hotword catalog")
         failures += 1
+    if '"--refresh-catalog-only" in sys.argv[1:]' not in daemon_source:
+        print("FAIL: catalog-only refresh must bypass acoustic model initialization")
+        failures += 1
+    elif daemon_source.index('"--refresh-catalog-only" in sys.argv[1:]') > daemon_source.index(
+        "PARAFORMER_ADAPTER.load()"
+    ):
+        print("FAIL: catalog-only branch must run before Paraformer model loading")
+        failures += 1
 
     swift = Path(__file__).resolve().parents[1] / "app" / "LocalVoiceInput.swift"
     swift_source = swift.read_text(encoding="utf-8")

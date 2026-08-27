@@ -61,13 +61,13 @@ def select_hotword_entries(
     draft_text: str = "",
     app_name: str = "",
     app_bundle: str = "",
-    recent_terms: Mapping[str, int] | None = None,
+    recent_terms: Mapping[str, float] | None = None,
     limit: int = 16,
 ) -> HotwordSelection:
     """Return only glossary entries with observable evidence for this utterance."""
     if limit <= 0:
         return HotwordSelection((), (), {})
-    recent = {key.casefold(): max(0, int(value)) for key, value in (recent_terms or {}).items()}
+    recent = {key.casefold(): max(0.0, float(value)) for key, value in (recent_terms or {}).items()}
     ranked: list[tuple[float, int, GlossaryEntry, tuple[str, ...], bool]] = []
     for index, entry in enumerate(entries):
         score = 0.0

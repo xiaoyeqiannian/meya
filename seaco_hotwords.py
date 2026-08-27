@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
+from itertools import product
 import json
 from pathlib import Path
 import re
@@ -31,6 +32,7 @@ class HotwordEntryReport:
     status: str
     effective_forms: tuple[str, ...]
     rejected_forms: tuple[str, ...]
+    pronunciation_suggestions: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,128 @@ def analyze_form(
     else:
         status = "unknown"
     return HotwordForm(text, source, status, tokens)
+
+
+# These are suggestions, not automatic glossary rewrites.  Keep the table small
+# and predictable; unknown words still get the spelled-letter fallback below.
+TECHNICAL_PRONUNCIATIONS: dict[str, tuple[str, ...]] = {
+    "api": ("艾皮艾",),
+    "bohr": ("玻尔",),
+    "bohrium": ("博瑞姆", "玻尔"),
+    "build": ("比尔德",),
+    "buildkit": ("比尔德凯特",),
+    "cd": ("西迪",),
+    "ci": ("西艾",),
+    "cli": ("西艾勒艾",),
+    "containerd": ("康坦纳迪",),
+    "core": ("科尔",),
+    "docker": ("道克尔",),
+    "dockerfile": ("道克尔发奥",),
+    "eci": ("伊西艾",),
+    "file": ("发奥",),
+    "fs": ("艾弗艾丝",),
+    "git": ("吉特",),
+    "gitlab": ("吉特莱布",),
+    "grafana": ("格拉法纳",),
+    "kubernetes": ("库伯内蒂斯",),
+    "kruise": ("克鲁斯",),
+    "lab": ("莱布",),
+    "lebesgue": ("勒贝格",),
+    "nacos": ("纳科斯",),
+    "open": ("欧盆",),
+    "openapi": ("欧盆艾皮艾",),
+    "openkruise": ("欧盆克鲁斯",),
+    "overlay": ("欧沃雷",),
+    "overlayfs": ("欧沃雷艾弗艾丝",),
+    "sandbox": ("沙箱", "三德博克斯"),
+    "snapshot": ("斯纳普肖特",),
+    "snapshotter": ("斯纳普肖特尔",),
+    "utility": ("尤提里提",),
+}
+
+LETTER_PRONUNCIATIONS = {
+    "a": "诶", "b": "比", "c": "西", "d": "迪", "e": "伊", "f": "艾弗",
+    "g": "吉", "h": "艾尺", "i": "艾", "j": "杰", "k": "凯", "l": "艾勒",
+    "m": "艾姆", "n": "艾恩", "o": "欧", "p": "皮", "q": "丘", "r": "阿尔",
+    "s": "艾丝", "t": "提", "u": "优", "v": "维", "w": "达不溜", "x": "艾克斯",
+    "y": "歪", "z": "贼德",
+}
+DIGIT_PRONUNCIATIONS = dict(zip("0123456789", "零一二三四五六七八九"))
+ASCII_RUN_PATTERN = re.compile(r"[A-Za-z0-9]+")
+WORD_PART_PATTERN = re.compile(r"[A-Z]+(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|[0-9]+")
+
+
+def _spell_ascii(value: str) -> str:
+    return "".join(
+        LETTER_PRONUNCIATIONS.get(character.lower(), DIGIT_PRONUNCIATIONS.get(character, ""))
+        for character in value
+    )
+
+
+def _ascii_run_suggestions(value: str) -> tuple[str, ...]:
+    direct = TECHNICAL_PRONUNCIATIONS.get(value.casefold(), ())
+    parts = WORD_PART_PATTERN.findall(value)
+    combined: list[str] = []
+    if len(parts) > 1:
+        choices = [
+            TECHNICAL_PRONUNCIATIONS.get(part.casefold(), (_spell_ascii(part),))[:2]
+            for part in parts
+        ]
+        combined.extend("".join(items) for items in product(*choices))
+    spelled = _spell_ascii(value)
+    return tuple(dict.fromkeys((*direct, *combined, spelled)))
+
+
+def _replace_ascii_runs(value: str, limit: int = 6) -> tuple[str, ...]:
+    matches = list(ASCII_RUN_PATTERN.finditer(value))
+    if not matches:
+        return (value,)
+    choices = [_ascii_run_suggestions(match.group())[:2] for match in matches]
+    output: list[str] = []
+    for replacements in product(*choices):
+        pieces: list[str] = []
+        cursor = 0
+        for match, replacement in zip(matches, replacements):
+            pieces.append(value[cursor:match.start()])
+            pieces.append(replacement)
+            cursor = match.end()
+        pieces.append(value[cursor:])
+        candidate = "".join(pieces)
+        candidate = re.sub(r"[-_/+.\s]+", "", candidate)
+        if candidate:
+            output.append(candidate)
+        if len(output) >= limit:
+            break
+    return tuple(dict.fromkeys(output))
+
+
+def pronunciation_suggestions(
+    canonical: str,
+    aliases: tuple[str, ...],
+    seg_dict: dict[str, tuple[str, ...]],
+    *,
+    limit: int = 3,
+) -> tuple[str, ...]:
+    """Return only user-confirmable Chinese forms that SeACo can encode."""
+    raw_candidates: list[str] = []
+    for value in (*aliases, canonical):
+        raw_candidates.extend(_replace_ascii_runs(value))
+    seen: set[str] = set()
+    suggestions: list[str] = []
+    for candidate in raw_candidates:
+        key = candidate.casefold()
+        if (
+            key in seen
+            or candidate.casefold() == canonical.casefold()
+            or not re.search(r"[\u4e00-\u9fa5]", candidate)
+        ):
+            continue
+        seen.add(key)
+        if analyze_form(candidate, "suggestion", seg_dict).status == "effective":
+            suggestions.append(candidate)
+            if len(suggestions) >= limit:
+                break
+    return tuple(suggestions)
 
 
 def compile_glossary(
@@ -163,7 +287,14 @@ def compile_glossary(
             status = "partial_unknown"
         else:
             status = "unknown"
-        reports.append(HotwordEntryReport(entry.canonical, status, effective, rejected))
+        suggestions = (
+            pronunciation_suggestions(entry.canonical, entry.aliases, seg_dict)
+            if status != "effective"
+            else ()
+        )
+        reports.append(
+            HotwordEntryReport(entry.canonical, status, effective, rejected, suggestions)
+        )
     return HotwordCompilation(tuple(selected), tuple(reports))
 
 
@@ -174,7 +305,7 @@ def write_compilation_report(
     model: str,
 ) -> None:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "model": model,
         "summary": {

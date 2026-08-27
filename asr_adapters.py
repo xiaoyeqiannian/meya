@@ -16,8 +16,11 @@ from seaco_hotwords import compile_glossary, write_compilation_report
 
 PARAFORMER_PREFIX = "paraformer:"
 DEFAULT_PARAFORMER_MODEL = "funasr/paraformer-zh"
+DEFAULT_SEACO_MODEL = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 DEFAULT_PUNCTUATION_MODEL = "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
-STREAMING_CHUNK_SIZE = [0, 10, 5]
+# 480 ms encoder chunks reduce first-character latency without the repetition
+# observed with the more aggressive 300 ms setting on local Mandarin samples.
+STREAMING_CHUNK_SIZE = [0, 8, 4]
 STREAMING_CHUNK_SAMPLES = STREAMING_CHUNK_SIZE[1] * 960
 
 
@@ -98,6 +101,34 @@ def resolve_punctuation_source(project_dir: Path) -> Path | None:
     )
     required = ("config.yaml", "model.pt")
     return source.resolve() if all((source / name).exists() for name in required) else None
+
+
+def resolve_catalog_adapter(
+    project_dir: Path,
+    preferred_models: tuple[str, ...] = (),
+) -> "ParaformerAdapter | None":
+    """Find a local SeACo seg_dict without loading FunASR or model weights."""
+    candidates: list[str] = [*preferred_models, DEFAULT_SEACO_MODEL]
+    model_root = project_dir / "models" / "paraformer"
+    if model_root.exists():
+        candidates.extend(str(path) for path in sorted(model_root.iterdir()) if path.is_dir())
+    seen: set[str] = set()
+    for raw_model in candidates:
+        local_candidate = Path(raw_model).expanduser()
+        if local_candidate.exists():
+            backend, model = "paraformer", str(local_candidate)
+        else:
+            backend, model = split_model_identifier(raw_model)
+        if backend != "paraformer" or model in seen:
+            continue
+        seen.add(model)
+        try:
+            adapter = ParaformerAdapter(project_dir, model, role="catalog")
+        except (FileNotFoundError, OSError):
+            continue
+        if adapter.is_seaco and adapter.seg_dict_path.is_file():
+            return adapter
+    return None
 
 
 class ParaformerAdapter:

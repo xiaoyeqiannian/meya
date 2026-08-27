@@ -14,6 +14,7 @@ from asr_adapters import (  # noqa: E402
     ParaformerAdapter,
     _merge_stream_text,
     paraformer_identifier,
+    resolve_catalog_adapter,
     resolve_punctuation_source,
     resolve_paraformer_source,
     split_model_identifier,
@@ -77,6 +78,10 @@ def main() -> int:
         adapter.prepare_hotwords([GlossaryEntry("main")], max_terms=1)
         assert json.loads(adapter.catalog_report_path.read_text(encoding="utf-8"))["summary"]["entries"] == 2
         assert json.loads(adapter.active_report_path.read_text(encoding="utf-8"))["summary"]["entries"] == 1
+        catalog_adapter = resolve_catalog_adapter(project)
+        assert catalog_adapter is not None
+        assert catalog_adapter.source == seaco.resolve()
+        assert catalog_adapter.model is None
 
     print("ASR adapter tests passed")
     return 0

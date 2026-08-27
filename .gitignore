@@ -38,4 +38,7 @@ recorder
 glossary.tsv
 feedback-candidates.json
 hotword-usage.json
+learning.sqlite3
+learning.sqlite3-shm
+learning.sqlite3-wal
 fn-status.json
