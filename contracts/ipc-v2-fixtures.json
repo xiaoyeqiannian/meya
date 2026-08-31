@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "byte_order": "big-endian header; PCM16 payload is little-endian",
+  "header_size": 36,
+  "fixtures": [
+    {
+      "name": "control_ping_unicode_neutral",
+      "type": 1,
+      "flags": 0,
+      "session": "00112233-4455-6677-8899-aabbccddeeff",
+      "sequence": 72623859790382856,
+      "payload_utf8": "{\"command\":\"ping\"}",
+      "wire_hex": "4d455941020100000000001200112233445566778899aabbccddeeff01020304050607087b22636f6d6d616e64223a2270696e67227d"
+    },
+    {
+      "name": "pcm16_four_bytes",
+      "type": 2,
+      "flags": 0,
+      "session": "00112233-4455-6677-8899-aabbccddeeff",
+      "sequence": 9,
+      "payload_hex": "0001feff",
+      "wire_hex": "4d455941020200000000000400112233445566778899aabbccddeeff00000000000000090001feff"
+    }
+  ]
+}

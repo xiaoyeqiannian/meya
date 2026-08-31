@@ -19,7 +19,7 @@ if [[ ! -x "$helper" ]]; then
     -framework Carbon
 fi
 
-version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_dir/Contents/Info.plist")"
+version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_dir/Contents/Info.plist")"
 package_path="$output_dir/麦芽-Meya-v${version}-本地语音输入法-离线安装包.pkg"
 payload_dir="$package_root/Library/Application Support/LocalVoiceInput/InstallerPayload"
 

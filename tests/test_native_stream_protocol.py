@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 import sys
 
@@ -31,8 +30,8 @@ class FakeStreamingAdapter:
 
 def main() -> int:
     samples = np.array([0, 1_000, -1_000, 32_767], dtype="<i2")
-    encoded = base64.b64encode(samples.tobytes()).decode("ascii")
-    decoded = daemon.decode_pcm16(encoded)
+    pcm16 = samples.tobytes()
+    decoded = daemon.decode_pcm16(pcm16)
     assert decoded.dtype == np.float32
     assert len(decoded) == len(samples)
     assert decoded[-1] > 0.99
@@ -53,7 +52,7 @@ def main() -> int:
     result = daemon.stream_chunk_request({
         "id": 2,
         "session": "test-session",
-        "pcm16": encoded,
+        "_pcm16_bytes": pcm16,
     })
     assert result["text"] == "测试"
     assert result["streaming"] is True

@@ -31,11 +31,17 @@ def main() -> int:
     assert "acceptSuggestion" in source
     assert 'saveButton.title = "正在检测…"' in source
     assert 'case pronunciationSuggestions = "pronunciation_suggestions"' in source
-    assert 'title: "管理已学规则…"' in source
+    assert 'title: "自动学习规则…"' in source
+    assert 'title: "训练数据…"' in source
+    assert "onReviewLearning()" in source
     assert 'sendLearningCommand("list_learning_rules"' in source
     assert 'sendLearningCommand("rollback_learning_rule"' in source
     assert "rule.hitCount" in source
     assert "rule.evidence" in source
+    assert "retainTrainingSample" not in source
+    assert 'case trainingSampleSaved = "training_sample_saved"' in source
+    assert 'case trainingSampleReady = "training_sample_ready"' in source
+    assert "response.trainingSampleSaved == true" in source
     print("feedback UI flow tests passed")
     return 0
 

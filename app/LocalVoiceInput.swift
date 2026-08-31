@@ -1037,6 +1037,7 @@ private enum UserDataStore {
     static var glossaryURL: URL { directory.appendingPathComponent("glossary.tsv") }
     static var correctionsURL: URL { directory.appendingPathComponent("corrections.tsv") }
     static var modelConfigURL: URL { directory.appendingPathComponent("model-config.json") }
+    static var trainingDataURL: URL { directory.appendingPathComponent("training-data", isDirectory: true) }
 
     static func prepare(seedDirectory: URL) {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1096,6 +1097,8 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
     NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private let projectDirectory: URL
     private let onGlossarySaved: (@escaping (Result<Void, Error>) -> Void) -> Void
+    private let onReviewLearning: () -> Void
+    private let onOpenTrainingData: () -> Void
     private var window: NSWindow!
     private let tableView = NSTableView()
     private var rows: [GlossaryRow] = []
@@ -1112,10 +1115,14 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
 
     init(
         projectDirectory: URL,
-        onGlossarySaved: @escaping (@escaping (Result<Void, Error>) -> Void) -> Void
+        onGlossarySaved: @escaping (@escaping (Result<Void, Error>) -> Void) -> Void,
+        onReviewLearning: @escaping () -> Void,
+        onOpenTrainingData: @escaping () -> Void
     ) {
         self.projectDirectory = projectDirectory
         self.onGlossarySaved = onGlossarySaved
+        self.onReviewLearning = onReviewLearning
+        self.onOpenTrainingData = onOpenTrainingData
         super.init()
         buildWindow()
     }
@@ -1210,6 +1217,22 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
         importButton.bezelStyle = .rounded
         importButton.translatesAutoresizingMaskIntoConstraints = false
 
+        let learnedRulesButton = NSButton(
+            title: "自动学习规则…",
+            target: self,
+            action: #selector(reviewLearning)
+        )
+        learnedRulesButton.bezelStyle = .rounded
+        learnedRulesButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let trainingDataButton = NSButton(
+            title: "训练数据…",
+            target: self,
+            action: #selector(openTrainingData)
+        )
+        trainingDataButton.bezelStyle = .rounded
+        trainingDataButton.translatesAutoresizingMaskIntoConstraints = false
+
         saveButton.target = self
         saveButton.action = #selector(saveTerms)
         saveButton.bezelStyle = .rounded
@@ -1228,6 +1251,8 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
         content.addSubview(addButton)
         content.addSubview(removeButton)
         content.addSubview(importButton)
+        content.addSubview(learnedRulesButton)
+        content.addSubview(trainingDataButton)
         content.addSubview(saveButton)
         content.addSubview(statusLabel)
 
@@ -1248,12 +1273,24 @@ private final class KeywordLibraryController: NSObject, NSWindowDelegate,
             removeButton.centerYAnchor.constraint(equalTo: addButton.centerYAnchor),
             importButton.leadingAnchor.constraint(equalTo: removeButton.trailingAnchor, constant: 8),
             importButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            learnedRulesButton.leadingAnchor.constraint(equalTo: importButton.trailingAnchor, constant: 8),
+            learnedRulesButton.centerYAnchor.constraint(equalTo: importButton.centerYAnchor),
+            trainingDataButton.leadingAnchor.constraint(equalTo: learnedRulesButton.trailingAnchor, constant: 8),
+            trainingDataButton.centerYAnchor.constraint(equalTo: importButton.centerYAnchor),
             statusLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             statusLabel.trailingAnchor.constraint(equalTo: title.trailingAnchor),
             statusLabel.bottomAnchor.constraint(equalTo: importButton.topAnchor, constant: -10),
             saveButton.trailingAnchor.constraint(equalTo: title.trailingAnchor),
             saveButton.centerYAnchor.constraint(equalTo: importButton.centerYAnchor),
         ])
+    }
+
+    @objc private func reviewLearning() {
+        onReviewLearning()
+    }
+
+    @objc private func openTrainingData() {
+        onOpenTrainingData()
     }
 
     private func loadTerms() {
@@ -2154,6 +2191,28 @@ private struct LearningRuleResponse: Decodable {
     }
 }
 
+private struct ASRCapabilities: Decodable {
+    let backend: String
+    let model: String
+    let role: String
+    let streamingMode: String
+    let hotwordMode: String
+    let punctuation: Bool
+    let languages: [String]
+    let protocolVersions: [Int]
+    let audioTransports: [String]
+
+    var supportsNativeStreaming: Bool { streamingMode == "native" }
+
+    enum CodingKeys: String, CodingKey {
+        case backend, model, role, punctuation, languages
+        case streamingMode = "streaming_mode"
+        case hotwordMode = "hotword_mode"
+        case protocolVersions = "protocol_versions"
+        case audioTransports = "audio_transports"
+    }
+}
+
 private struct ASRResponse: Decodable {
     let id: Int?
     let event: String?
@@ -2174,6 +2233,11 @@ private struct ASRResponse: Decodable {
     let revision: Int?
     let language: String?
     let acceptedUnchanged: Bool?
+    let trainingSampleSaved: Bool?
+    let trainingSampleReady: Bool?
+    let trainingSampleStatus: String?
+    let trainingSampleID: String?
+    let trainingSampleError: String?
     let observed: [FeedbackCandidateResponse]?
     let activated: [FeedbackCandidateResponse]?
     let rules: [LearningRuleResponse]?
@@ -2183,6 +2247,7 @@ private struct ASRResponse: Decodable {
     let session: String?
     let duration: Double?
     let elapsed: Double?
+    let capabilities: ASRCapabilities?
 
     enum CodingKeys: String, CodingKey {
         case id, event, final, text, error, model, role, refined, silence, revision, language
@@ -2194,7 +2259,12 @@ private struct ASRResponse: Decodable {
         case tailText = "tail_text"
         case lastHypothesis = "last_hypothesis"
         case acceptedUnchanged = "accepted_unchanged"
-        case observed, activated, rules, supported, streaming, session, duration, elapsed
+        case trainingSampleSaved = "training_sample_saved"
+        case trainingSampleReady = "training_sample_ready"
+        case trainingSampleStatus = "training_sample_status"
+        case trainingSampleID = "training_sample_id"
+        case trainingSampleError = "training_sample_error"
+        case observed, activated, rules, supported, streaming, session, duration, elapsed, capabilities
         case ruleID = "rule_id"
     }
 }
@@ -2210,7 +2280,7 @@ private final class ASRService {
     private let outputPipe = Pipe()
     private let errorPipe = Pipe()
     private let queue = DispatchQueue(label: "LocalVoiceInput.ASRService")
-    private var outputBuffer = Data()
+    private let frameDecoder = MeyaFrameDecoder()
     private var nextID = 1
     private var pending: [Int: Completion] = [:]
     private var isStopping = false
@@ -2218,10 +2288,9 @@ private final class ASRService {
     private var activeStreamSession: String?
     private var streamBuffer: [Float] = []
     private var streamRequestInFlight = false
-    private var streamRevision = 0
     private var streamPartialHandler: Completion?
 
-    var onReady: ((String, Bool) -> Void)?
+    var onReady: ((String, ASRCapabilities?) -> Void)?
     var onFatal: ((String) -> Void)?
 
     init(projectDirectory: URL, model: String, role: String) {
@@ -2240,7 +2309,10 @@ private final class ASRService {
             )
         }
         process.executableURL = python
-        process.arguments = ["-u", projectDirectory.appendingPathComponent("asr_daemon.py").path]
+        process.arguments = [
+            "-u",
+            projectDirectory.appendingPathComponent("asr_daemon.py").path,
+        ]
         process.currentDirectoryURL = projectDirectory
         var environment = ProcessInfo.processInfo.environment
         environment["HF_HUB_OFFLINE"] = "1"
@@ -2328,9 +2400,7 @@ private final class ASRService {
             if let appName, !appName.isEmpty { request["app_name"] = appName }
             if let appBundle, !appBundle.isEmpty { request["app_bundle"] = appBundle }
             do {
-                var data = try JSONSerialization.data(withJSONObject: request)
-                data.append(0x0A)
-                try self.inputPipe.fileHandleForWriting.write(contentsOf: data)
+                try self.writeControlOnQueue(request, sequence: id)
             } catch {
                 self.pending.removeValue(forKey: id)
                 DispatchQueue.main.async { completion(.failure(error)) }
@@ -2366,7 +2436,6 @@ private final class ASRService {
             self.activeStreamSession = sessionID
             self.streamBuffer.removeAll(keepingCapacity: true)
             self.streamRequestInFlight = false
-            self.streamRevision = 0
             self.streamPartialHandler = onPartial
             self.sendRequestOnQueue(
                 ["command": "stream_start", "session": sessionID],
@@ -2417,16 +2486,10 @@ private final class ASRService {
         let chunk = Array(streamBuffer.prefix(sampleCount))
         streamBuffer.removeFirst(sampleCount)
         streamRequestInFlight = true
-        streamRevision += 1
-        let revision = streamRevision
-        let encoded = Self.encodePCM16(chunk)
-        sendRequestOnQueue(
-            [
-                "command": "stream_chunk",
-                "session": sessionID,
-                "revision": revision,
-                "pcm16": encoded,
-            ],
+        let pcm16 = Self.encodePCM16(chunk)
+        sendAudioOnQueue(
+            pcm16,
+            sessionID: sessionID,
             timeout: 15
         ) { [weak self] result in
             guard let self else { return }
@@ -2442,13 +2505,12 @@ private final class ASRService {
         }
     }
 
-    private static func encodePCM16(_ samples: [Float]) -> String {
+    private static func encodePCM16(_ samples: [Float]) -> Data {
         var pcm = samples.map { sample -> Int16 in
             let value = max(-1, min(1, sample))
-            return Int16((value * 32_767).rounded())
+            return Int16((value * 32_767).rounded()).littleEndian
         }
-        let data = pcm.withUnsafeMutableBytes { Data($0) }
-        return data.base64EncodedString()
+        return pcm.withUnsafeMutableBytes { Data($0) }
     }
 
     private func sendRequestOnQueue(
@@ -2462,9 +2524,8 @@ private final class ASRService {
         var payload = request
         payload["id"] = id
         do {
-            var data = try JSONSerialization.data(withJSONObject: payload)
-            data.append(0x0A)
-            try inputPipe.fileHandleForWriting.write(contentsOf: data)
+            let session = (payload["session"] as? String).flatMap(UUID.init(uuidString:))
+            try writeControlOnQueue(payload, session: session, sequence: id)
         } catch {
             pending.removeValue(forKey: id)
             DispatchQueue.main.async { completion(.failure(error)) }
@@ -2482,6 +2543,63 @@ private final class ASRService {
         }
     }
 
+    private func sendAudioOnQueue(
+        _ pcm16: Data,
+        sessionID: String,
+        timeout: Double,
+        completion: @escaping Completion
+    ) {
+        guard let session = UUID(uuidString: sessionID) else {
+            completion(.failure(NSError(
+                domain: "LocalVoiceInput.ASR",
+                code: 6,
+                userInfo: [NSLocalizedDescriptionKey: "流式会话标识无效"]
+            )))
+            return
+        }
+        let id = nextID
+        nextID += 1
+        pending[id] = completion
+        do {
+            let frame = MeyaFrame(
+                type: .audioPCM16,
+                session: session,
+                sequence: UInt64(id),
+                payload: pcm16
+            )
+            try inputPipe.fileHandleForWriting.write(contentsOf: frame.encoded())
+        } catch {
+            pending.removeValue(forKey: id)
+            DispatchQueue.main.async { completion(.failure(error)) }
+            return
+        }
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, let expired = self.pending.removeValue(forKey: id) else { return }
+            DispatchQueue.main.async {
+                expired(.failure(NSError(
+                    domain: "LocalVoiceInput.ASR",
+                    code: 5,
+                    userInfo: [NSLocalizedDescriptionKey: "流式识别请求超时"]
+                )))
+            }
+        }
+    }
+
+    private func writeControlOnQueue(
+        _ request: [String: Any],
+        session: UUID? = nil,
+        sequence: Int
+    ) throws {
+        let payload = try JSONSerialization.data(withJSONObject: request)
+        let frame = MeyaFrame(
+            type: .control,
+            session: session ?? MeyaFrame.zeroSession,
+            sequence: UInt64(sequence),
+            payload: payload
+        )
+        try inputPipe.fileHandleForWriting.write(contentsOf: frame.encoded())
+    }
+
     func submitFeedback(
         expectedText: String,
         editedText: String,
@@ -2490,6 +2608,7 @@ private final class ASRService {
         audioPath: String,
         appName: String,
         explicit: Bool = false,
+        recognitionModel: String = "",
         completion: @escaping Completion
     ) {
         queue.async { [weak self] in
@@ -2517,11 +2636,10 @@ private final class ASRService {
                 "audio_path": audioPath,
                 "app_name": appName,
                 "explicit": explicit,
+                "recognition_model": recognitionModel,
             ]
             do {
-                var data = try JSONSerialization.data(withJSONObject: request)
-                data.append(0x0A)
-                try self.inputPipe.fileHandleForWriting.write(contentsOf: data)
+                try self.writeControlOnQueue(request, sequence: id)
             } catch {
                 self.pending.removeValue(forKey: id)
                 DispatchQueue.main.async { completion(.failure(error)) }
@@ -2571,9 +2689,7 @@ private final class ASRService {
             var request: [String: Any] = ["id": id, "command": command]
             if let ruleID { request["rule_id"] = ruleID }
             do {
-                var data = try JSONSerialization.data(withJSONObject: request)
-                data.append(0x0A)
-                try self.inputPipe.fileHandleForWriting.write(contentsOf: data)
+                try self.writeControlOnQueue(request, sequence: id)
             } catch {
                 self.pending.removeValue(forKey: id)
                 DispatchQueue.main.async { completion(.failure(error)) }
@@ -2613,9 +2729,7 @@ private final class ASRService {
                 "command": "refresh_hotword_catalog",
             ]
             do {
-                var data = try JSONSerialization.data(withJSONObject: request)
-                data.append(0x0A)
-                try self.inputPipe.fileHandleForWriting.write(contentsOf: data)
+                try self.writeControlOnQueue(request, sequence: id)
             } catch {
                 self.pending.removeValue(forKey: id)
                 DispatchQueue.main.async { completion(.failure(error)) }
@@ -2654,41 +2768,43 @@ private final class ASRService {
     }
 
     private func consumeOutput(_ data: Data) {
-        outputBuffer.append(data)
-        while let newline = outputBuffer.firstIndex(of: 0x0A) {
-            let line = outputBuffer.prefix(upTo: newline)
-            outputBuffer.removeSubrange(...newline)
-            guard !line.isEmpty else { continue }
-            do {
-                let response = try JSONDecoder().decode(ASRResponse.self, from: Data(line))
-                if response.event == "ready" {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.onReady?(response.model ?? "", response.streaming == true)
-                    }
-                    continue
-                }
-                if response.event == "fatal" {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.onFatal?(response.error ?? "未知模型错误")
-                    }
-                    continue
-                }
-                guard let id = response.id, let completion = pending.removeValue(forKey: id) else {
-                    continue
-                }
-                DispatchQueue.main.async {
-                    if let message = response.error {
-                        completion(.failure(NSError(
-                            domain: "LocalVoiceInput.ASR",
-                            code: 1,
-                            userInfo: [NSLocalizedDescriptionKey: message]
-                        )))
-                    } else {
-                        completion(.success(response))
-                    }
-                }
-            } catch {
-                NSLog("ASR JSON 解析失败: %@", error.localizedDescription)
+        do {
+            for frame in try frameDecoder.append(data) {
+                guard frame.type == .event || frame.type == .error else { continue }
+                let response = try JSONDecoder().decode(ASRResponse.self, from: frame.payload)
+                handleResponse(response)
+            }
+        } catch {
+            NSLog("ASR IPC 解析失败: %@", error.localizedDescription)
+            failPending(error)
+        }
+    }
+
+    private func handleResponse(_ response: ASRResponse) {
+        if response.event == "ready" {
+            DispatchQueue.main.async { [weak self] in
+                self?.onReady?(response.model ?? "", response.capabilities)
+            }
+            return
+        }
+        if response.event == "fatal" {
+            DispatchQueue.main.async { [weak self] in
+                self?.onFatal?(response.error ?? "未知模型错误")
+            }
+            return
+        }
+        guard let id = response.id, let completion = pending.removeValue(forKey: id) else {
+            return
+        }
+        DispatchQueue.main.async {
+            if let message = response.error {
+                completion(.failure(NSError(
+                    domain: "LocalVoiceInput.ASR",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                )))
+            } else {
+                completion(.success(response))
             }
         }
     }
@@ -2844,6 +2960,7 @@ private final class LiveDraftInserter {
     private var lastDraft = ""
     private var usesAccessibilityRange = false
     private var selectionIsKnown = false
+    private var selectionRangeIsSettable = false
     private var frontmostPID: pid_t?
     private var initialValue: String?
     private var pendingFeedback: PendingFeedbackObservation?
@@ -2890,6 +3007,7 @@ private final class LiveDraftInserter {
         originalText = initialSelectedText
         ownedRange = selection
         selectionIsKnown = true
+        selectionRangeIsSettable = selectedRangeIsSettable(focused)
         usesAccessibilityRange = supportsDraftEditing(focused)
         isReady = true
         writeDiagnostic(state: usesAccessibilityRange ? "ready_accessibility_range" : "ready_unicode_fallback")
@@ -3100,14 +3218,31 @@ private final class LiveDraftInserter {
         with replacement: String,
         finish: Bool
     ) -> Bool {
-        guard frontmostApplicationIsUnchanged(), keyboardTargetIsSafe() else {
+        guard frontmostApplicationIsUnchanged() else {
             writeDiagnostic(state: "unicode_fallback_lost_focus")
-            reset()
             return false
         }
-        guard postBackspaces(lastDraft.count), postUnicode(replacement) else {
+
+        let replaced: Bool
+        if selectionIsKnown, selectionRangeIsSettable, let target {
+            // Pointer clicks can move the caret while a live hypothesis is on
+            // screen. Select and verify the exact range Meya owns, then type
+            // over that selection in one operation. This cannot backspace at
+            // an accidentally relocated caret.
+            guard targetStillFocused(target), ownsCurrentDraft(target) else {
+                writeDiagnostic(state: "unicode_fallback_draft_moved")
+                return false
+            }
+            replaced = setSelectedRange(ownedRange, on: target) && postUnicode(replacement)
+        } else {
+            guard keyboardTargetIsSafe() else {
+                writeDiagnostic(state: "unicode_fallback_lost_focus")
+                return false
+            }
+            replaced = postBackspaces(lastDraft.count) && postUnicode(replacement)
+        }
+        guard replaced else {
             writeDiagnostic(state: "unicode_fallback_event_failed")
-            reset()
             return false
         }
         ownedRange.length = replacement.utf16.count
@@ -3253,6 +3388,15 @@ private final class LiveDraftInserter {
         return textSettable.boolValue && rangeSettable.boolValue
     }
 
+    private func selectedRangeIsSettable(_ element: AXUIElement) -> Bool {
+        var settable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            &settable
+        ) == .success && settable.boolValue
+    }
+
     private func isSecureField(_ element: AXUIElement) -> Bool {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -3373,6 +3517,7 @@ private final class LiveDraftInserter {
         lastDraft = ""
         usesAccessibilityRange = false
         selectionIsKnown = false
+        selectionRangeIsSettable = false
         frontmostPID = nil
         initialValue = nil
         isReady = false
@@ -3490,6 +3635,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var recordingAppName = ""
     private var recordingAppBundle = ""
     private var draftRevision = 0
+    private var liveDraftPointerPauseUntil = Date.distantPast
     private var isRecording = false
     private var isFinalizing = false
     private var asrReady = false
@@ -3568,10 +3714,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         setStatusIcon(description: "麦芽 Meya 正在加载模型")
-        statusItem.button?.toolTip = "麦芽 Meya（长按 Fn 录音，松开识别）"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1"
+        statusItem.button?.toolTip = "麦芽 Meya · v\(version)（长按 Fn 录音，松开识别）"
 
         let menu = NSMenu()
         menu.delegate = self
+        let versionItem = NSMenuItem(title: "麦芽 Meya · v\(version)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
         functionKeyStatusItem = NSMenuItem(title: "○ 麦芽正在加载…", action: nil, keyEquivalent: "")
         functionKeyStatusItem.isEnabled = false
         menu.addItem(functionKeyStatusItem)
@@ -3597,14 +3747,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         let moreItem = NSMenuItem(title: "更多", action: nil, keyEquivalent: "")
         let moreMenu = NSMenu(title: "更多")
-
-        let reviewLearningItem = NSMenuItem(
-            title: "管理已学规则…",
-            action: #selector(reviewLearningRules),
-            keyEquivalent: ""
-        )
-        reviewLearningItem.target = self
-        moreMenu.addItem(reviewLearningItem)
 
         let folderItem = NSMenuItem(title: "打开录音目录…", action: #selector(openRecordings), keyEquivalent: "")
         folderItem.target = self
@@ -3651,7 +3793,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         guard !hasInputMonitoring || !hasAccessibility else { return }
 
         functionKeyStatusItem?.title = "⚠ Fn 不可用 · 请检查权限"
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1"
         let promptKey = "permissionsPromptedVersion"
         guard UserDefaults.standard.string(forKey: promptKey) != version else { return }
         UserDefaults.standard.set(version, forKey: promptKey)
@@ -3669,7 +3811,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let hasInputMonitoring = CGPreflightListenEventAccess()
         let hasAccessibility = AXIsProcessTrusted()
         let tapEnabled = functionKeyEventTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
         let mark: (Bool) -> String = { $0 ? "✓ 已允许" : "✕ 未允许" }
 
         let alert = NSAlert()
@@ -3681,7 +3824,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         辅助功能：\(mark(hasAccessibility))
         Fn 监听：\(tapEnabled ? "✓ 已就绪" : "○ 备用监听/等待权限")
 
-        版本：v\(version)
+        版本：v\(version)（构建 \(build)）
         授权变化会自动检测，无需重启麦芽。
         """
         alert.addButton(withTitle: "麦克风设置")
@@ -3739,9 +3882,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func setupFunctionKeyHold() {
         if screenMouseMonitor == nil {
             screenMouseMonitor = NSEvent.addGlobalMonitorForEvents(
-                matching: [.leftMouseDown, .rightMouseDown]
-            ) { _ in
+                matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+            ) { [weak self] _ in
                 FocusedInputScreenLocator.noteGlobalClick()
+                DispatchQueue.main.async {
+                    self?.notePointerInteractionDuringRecording()
+                }
             }
         }
         installFunctionKeyMonitorsIfNeeded()
@@ -4028,6 +4174,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             recordingAppBundle = frontmostApplication?.bundleIdentifier ?? ""
             try audioCapture.start()
             activeSession = UUID()
+            liveDraftPointerPauseUntil = .distantPast
             recordingInputController = activeInputController
             resetRollingWindow()
             liveDraftInserter.begin()
@@ -4117,6 +4264,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             lastHypothesis = response.lastHypothesis ?? lastHypothesis
             let preview = response.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !preview.isEmpty else { return }
+            if Date() < liveDraftPointerPauseUntil {
+                overlay.update(status: "输入中 · 松开 Fn 定稿")
+                return
+            }
             if liveDraftInserter.update(preview) {
                 overlay.update(status: "输入中 · 松开 Fn 定稿")
             } else {
@@ -4125,6 +4276,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         case .failure(let error):
             NSLog("临时识别失败: %@", error.localizedDescription)
         }
+    }
+
+    private func notePointerInteractionDuringRecording() {
+        guard isRecording else { return }
+        // Let the host editor finish moving focus/caret before the next live
+        // replacement. Recognition and audio capture continue uninterrupted.
+        liveDraftPointerPauseUntil = Date().addingTimeInterval(0.35)
     }
 
     private func finishRecording() {
@@ -4294,12 +4452,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             finalText: feedback.finalText,
             audioPath: feedback.audioPath,
             appName: feedback.appName,
-            explicit: explicit
+            explicit: explicit,
+            recognitionModel: finalModelName
         ) { [weak self] result in
             switch result {
             case .success(let response):
                 let foundMapping = !(response.activated ?? []).isEmpty
                     || !(response.observed ?? []).isEmpty
+                    || response.trainingSampleSaved == true
                 // No mapping means no learning happened. Preserve the
                 // observation so the user can correct it and retry.
                 if !explicit || foundMapping || response.acceptedUnchanged == true {
@@ -4468,7 +4628,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let observed = response.observed ?? []
         if let learned = activated.first ?? observed.first {
             let status = activated.isEmpty ? "已确认这个说法" : "已学习刚才的修改"
-            overlay.show(status: status, text: "\(learned.observed) → \(learned.canonical)")
+            let suffix: String
+            if response.trainingSampleReady == true {
+                suffix = "；已加入训练集"
+            } else if response.trainingSampleSaved == true {
+                suffix = "；整句已保存待复核"
+            } else {
+                suffix = ""
+            }
+            overlay.show(status: status, text: "\(learned.observed) → \(learned.canonical)\(suffix)")
+        } else if response.trainingSampleReady == true {
+            overlay.show(
+                status: "已保存学习记录",
+                text: "已保存该段录音和你确认的整句文字"
+            )
+        } else if response.trainingSampleSaved == true {
+            overlay.show(
+                status: "整句已保存待复核",
+                text: "本次改动无法安全对齐到语音，不会直接用于训练"
+            )
+        } else if let error = response.trainingSampleError, !error.isEmpty {
+            overlay.show(status: "未保存整句训练记录", text: error)
         } else {
             overlay.show(
                 status: "还没有提取出替换词",
@@ -4502,18 +4682,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     @objc private func openTerms() {
         if keywordLibraryController == nil {
             keywordLibraryController = KeywordLibraryController(
-                projectDirectory: projectDirectory
-            ) { [weak self] completion in
-                guard let self else {
-                    completion(.failure(NSError(
-                        domain: "LocalVoiceInput.HotwordCatalog",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "应用已关闭"]
-                    )))
-                    return
+                projectDirectory: projectDirectory,
+                onGlossarySaved: { [weak self] completion in
+                    guard let self else {
+                        completion(.failure(NSError(
+                            domain: "LocalVoiceInput.HotwordCatalog",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "应用已关闭"]
+                        )))
+                        return
+                    }
+                    self.refreshHotwordCatalog(completion: completion)
+                },
+                onReviewLearning: { [weak self] in
+                    self?.reviewLearningRules()
+                },
+                onOpenTrainingData: { [weak self] in
+                    self?.openTrainingData()
                 }
-                self.refreshHotwordCatalog(completion: completion)
-            }
+            )
         }
         keywordLibraryController?.show()
         refreshHotwordCatalog()
@@ -4665,11 +4852,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         } else {
             refineService = service
         }
-        service.onReady = { [weak self, weak service] loadedModel, nativeStreaming in
+        service.onReady = { [weak self, weak service] loadedModel, capabilities in
             guard let self, let service else { return }
             if role == "preview", self.previewService === service {
                 self.asrReady = true
-                self.previewNativeStreaming = nativeStreaming
+                self.previewNativeStreaming = capabilities?.supportsNativeStreaming ?? false
                 self.previewModelName = loadedModel
                 self.setStatusIcon(description: "麦芽 Meya")
                 if self.refineService == nil {
@@ -4720,6 +4907,56 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let directory = projectDirectory.appendingPathComponent("recordings/voice-input", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         NSWorkspace.shared.open(directory)
+    }
+
+    @objc private func openTrainingData() {
+        try? FileManager.default.createDirectory(
+            at: UserDataStore.trainingDataURL,
+            withIntermediateDirectories: true
+        )
+        let manifest = UserDataStore.trainingDataURL.appendingPathComponent("samples.jsonl")
+        var ready = 0
+        var pending = 0
+        if let source = try? String(contentsOf: manifest, encoding: .utf8) {
+            for line in source.split(separator: "\n") {
+                guard let data = String(line).data(using: .utf8),
+                      let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { continue }
+                if value["training_ready"] as? Bool == true {
+                    ready += 1
+                } else {
+                    pending += 1
+                }
+            }
+        }
+        var bytes: Int64 = 0
+        if let enumerator = FileManager.default.enumerator(
+            at: UserDataStore.trainingDataURL,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator {
+                let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+                bytes += Int64(values?.fileSize ?? 0)
+            }
+        }
+        let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "本地训练数据"
+        alert.informativeText = """
+        可直接训练：\(ready) 条
+        待复核：\(pending) 条
+        占用空间：\(size)
+
+        只有「可直接训练」样本会进入后续微调数据集。
+        """
+        alert.addButton(withTitle: "打开目录")
+        alert.addButton(withTitle: "完成")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(UserDataStore.trainingDataURL)
+        }
     }
 
     @objc private func quit() {

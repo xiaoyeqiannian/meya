@@ -13,6 +13,7 @@ if [[ -d "$app_dir" ]]; then
 fi
 
 xcrun swiftc \
+  "$project_dir/app/MeyaFramedProtocol.swift" \
   "$project_dir/app/LocalVoiceInput.swift" \
   -o "$build_dir/Meya" \
   -parse-as-library \

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "traces": [
+    {
+      "name": "short_press_is_not_consumed",
+      "events": ["trigger_pressed", "trigger_released"],
+      "states": ["idle", "arming", "idle"],
+      "required_actions": ["schedule_hold", "cancel_hold", "pass_through"]
+    },
+    {
+      "name": "native_draft_then_final_commit",
+      "events": ["trigger_pressed", "hold_elapsed", "partial", "trigger_released", "final", "commit_done"],
+      "states": ["idle", "arming", "recording", "recording", "finalizing", "committing", "idle"],
+      "required_actions": ["start_audio", "start_preview", "update_draft", "start_final", "commit_final", "cleanup_session"]
+    },
+    {
+      "name": "lost_sink_degrades_without_stopping_audio",
+      "events": ["trigger_pressed", "hold_elapsed", "sink_lost", "partial", "trigger_released", "final_timeout", "commit_done"],
+      "states": ["idle", "arming", "recording", "overlay_only", "overlay_only", "finalizing", "committing", "idle"],
+      "required_actions": ["route_draft_to_overlay", "update_overlay_draft", "commit_best_partial", "restart_final_worker"]
+    },
+    {
+      "name": "chord_cancels_owned_recording",
+      "events": ["trigger_pressed", "hold_elapsed", "trigger_cancelled", "cancel_done"],
+      "states": ["idle", "arming", "recording", "cancelling", "idle"],
+      "required_actions": ["stop_audio", "cancel_preview", "cancel_draft", "cleanup_session"]
+    }
+  ]
+}

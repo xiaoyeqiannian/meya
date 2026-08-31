@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import hashlib
 import os
 from pathlib import Path
 import sys
 import time
+from uuid import UUID
 
 import numpy as np
 
@@ -45,7 +45,22 @@ from glossary import (  # noqa: E402
     load_glossary,
 )
 from hotword_selector import HotwordSelection, select_hotword_entries  # noqa: E402
+from meya_core.capabilities import (  # noqa: E402
+    HotwordMode,
+    RecognizerCapabilities,
+    StreamingMode,
+)
+from meya_core.framing import (  # noqa: E402
+    Frame,
+    FrameType,
+    ProtocolError,
+    ZERO_SESSION,
+    json_frame,
+    read_frames,
+    write_frame,
+)
 from streaming_coordinator import should_rerun_full, stabilize  # noqa: E402
+from training_data import TrainingSampleRejected, TrainingSampleStore  # noqa: E402
 from transcribe import (  # noqa: E402
     apply_corrections,
     is_untrusted_preview_text,
@@ -65,15 +80,14 @@ LEARNING_STORE: FeedbackStore | None = None
 STREAM_SESSION_ID: str | None = None
 STREAM_PROCESSED_SAMPLES = 0
 STREAM_REVISION = 0
+def emit(payload: dict, *, session: UUID = ZERO_SESSION, sequence: int = 0) -> None:
+    kind = FrameType.ERROR if payload.get("error") or payload.get("event") == "fatal" else FrameType.EVENT
+    write_frame(sys.stdout.buffer, json_frame(kind, payload, session=session, sequence=sequence))
 
 
-def emit(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
-
-
-def decode_pcm16(payload: str) -> np.ndarray:
-    """Decode little-endian mono PCM16 sent directly by the macOS audio tap."""
-    raw = base64.b64decode(payload, validate=True)
+def decode_pcm16(payload: bytes) -> np.ndarray:
+    """Decode little-endian mono PCM16 from a v2 audio frame."""
+    raw = payload
     if len(raw) % 2:
         raise ValueError("流式音频数据长度无效")
     if not raw:
@@ -255,12 +269,36 @@ def feedback_request(request: dict) -> dict:
         user_data_dir=glossary_path.parent,
         explicit=bool(request.get("explicit", False)),
     )
+    training_sample: dict | None = None
+    training_sample_error: str | None = None
+    if bool(request.get("explicit", False)):
+        try:
+            training_sample = TrainingSampleStore(
+                glossary_path.parent,
+                PROJECT_DIR / "recordings" / "voice-input",
+            ).save_feedback(
+                expected_text=expected,
+                edited_text=edited,
+                raw_text=str(request.get("raw_text") or ""),
+                final_text=str(request.get("final_text") or ""),
+                audio_path=str(request.get("audio_path") or ""),
+                model=str(request.get("recognition_model") or MODEL_NAME),
+            )
+        except TrainingSampleRejected as error:
+            training_sample_error = str(error)
+        except OSError as error:
+            training_sample_error = f"保存本地微调样本失败：{error}"
     return {
         "id": int(request.get("id", 0)),
         "event": "feedback_processed",
         "accepted_unchanged": bool(event.get("accepted_unchanged")),
         "observed": event.get("observed", []),
         "activated": event.get("activated", []),
+        "training_sample_saved": training_sample is not None,
+        "training_sample_id": training_sample.get("sample_id") if training_sample else None,
+        "training_sample_ready": bool(training_sample and training_sample.get("training_ready")),
+        "training_sample_status": training_sample.get("label_status") if training_sample else None,
+        "training_sample_error": training_sample_error,
     }
 
 
@@ -513,6 +551,16 @@ def transcribe_request(request: dict) -> dict:
     }
 
 
+def normalized_session_id(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(UUID(raw))
+    except ValueError:
+        return raw
+
+
 def stream_start_request(request: dict) -> dict:
     """Start one cache-backed Paraformer session without touching the filesystem."""
     global STREAM_SESSION_ID, STREAM_PROCESSED_SAMPLES, STREAM_REVISION
@@ -522,7 +570,7 @@ def stream_start_request(request: dict) -> dict:
         or not PARAFORMER_ADAPTER.is_streaming
     ):
         raise RuntimeError("当前过程模型不支持原生流式识别")
-    session_id = str(request.get("session") or "").strip()
+    session_id = normalized_session_id(request.get("session"))
     if not session_id:
         raise ValueError("流式会话缺少 session")
     PARAFORMER_ADAPTER.reset_stream()
@@ -542,13 +590,16 @@ def stream_chunk_request(request: dict) -> dict:
     """Decode only newly captured PCM while retaining Paraformer encoder state."""
     global STREAM_PROCESSED_SAMPLES, STREAM_REVISION
     started = time.perf_counter()
-    session_id = str(request.get("session") or "").strip()
+    session_id = normalized_session_id(request.get("session"))
     if not STREAM_SESSION_ID or session_id != STREAM_SESSION_ID:
         raise RuntimeError("流式会话已失效")
     if PARAFORMER_ADAPTER is None or not PARAFORMER_ADAPTER.is_streaming:
         raise RuntimeError("Paraformer Streaming 模型尚未就绪")
 
-    audio = decode_pcm16(str(request.get("pcm16") or ""))
+    binary_audio = request.get("_pcm16_bytes")
+    if not isinstance(binary_audio, bytes):
+        raise ProtocolError("stream_chunk requires a PCM16 audio frame")
+    audio = decode_pcm16(binary_audio)
     request_id = int(request.get("id", 0))
     if not len(audio):
         return {
@@ -612,7 +663,7 @@ def stream_chunk_request(request: dict) -> dict:
 def stream_cancel_request(request: dict) -> dict:
     """Drop an unfinished preview tail; the final worker will refine the utterance."""
     global STREAM_SESSION_ID, STREAM_PROCESSED_SAMPLES, STREAM_REVISION
-    session_id = str(request.get("session") or "").strip()
+    session_id = normalized_session_id(request.get("session"))
     if PARAFORMER_ADAPTER is not None and (
         not STREAM_SESSION_ID or not session_id or session_id == STREAM_SESSION_ID
     ):
@@ -627,6 +678,102 @@ def stream_cancel_request(request: dict) -> dict:
         "streaming": True,
         "session": session_id,
     }
+
+
+def worker_capabilities() -> RecognizerCapabilities:
+    native_streaming = bool(PARAFORMER_ADAPTER is not None and PARAFORMER_ADAPTER.is_streaming)
+    if native_streaming:
+        streaming = StreamingMode.NATIVE
+    elif MODEL_ROLE == "preview":
+        streaming = StreamingMode.WINDOWED
+    else:
+        streaming = StreamingMode.NONE
+
+    if PARAFORMER_ADAPTER is not None and PARAFORMER_ADAPTER.is_seaco:
+        hotwords = HotwordMode.ACOUSTIC
+    elif MODEL_BACKEND == "qwen":
+        hotwords = HotwordMode.NATIVE
+    elif MODEL_BACKEND == "whisper":
+        hotwords = HotwordMode.PROMPT
+    else:
+        hotwords = HotwordMode.NONE
+    return RecognizerCapabilities(
+        backend=MODEL_BACKEND,
+        model=MODEL_NAME,
+        role=MODEL_ROLE,
+        streaming=streaming,
+        hotwords=hotwords,
+        punctuation=bool(
+            PARAFORMER_ADAPTER is not None
+            and PARAFORMER_ADAPTER.punctuation_source is not None
+        ),
+        languages=("zh", "en"),
+    )
+
+
+def dispatch_request(request: dict) -> tuple[dict, bool]:
+    """Transport-independent command dispatch used by legacy and v2 IPC."""
+    request_id = int(request.get("id", 0))
+    command = request.get("command")
+    if command == "quit":
+        return {"event": "bye"}, True
+    if command == "feedback":
+        return feedback_request(request), False
+    if command == "list_learning_rules":
+        return learning_rules_request(request_id), False
+    if command == "rollback_learning_rule":
+        return rollback_learning_rule_request(request), False
+    if command == "refresh_hotword_catalog":
+        return refresh_hotword_catalog(request_id), False
+    if command == "stream_start":
+        return stream_start_request(request), False
+    if command == "stream_chunk":
+        return stream_chunk_request(request), False
+    if command == "stream_cancel":
+        return stream_cancel_request(request), False
+    if command != "transcribe":
+        raise ValueError("不支持的命令")
+    return transcribe_request(request), False
+
+
+def dispatch_frame(frame: Frame) -> tuple[dict, bool]:
+    request_id = int(frame.sequence)
+    if frame.kind == FrameType.CONTROL:
+        request = frame.json()
+        request.setdefault("id", request_id)
+        if frame.session != ZERO_SESSION:
+            request.setdefault("session", str(frame.session))
+    elif frame.kind == FrameType.AUDIO_PCM16:
+        if frame.session == ZERO_SESSION:
+            raise ProtocolError("audio frame requires a session UUID")
+        request = {
+            "id": request_id,
+            "command": "stream_chunk",
+            "session": str(frame.session),
+            "_pcm16_bytes": frame.payload,
+        }
+    elif frame.kind == FrameType.HEARTBEAT:
+        return {"id": request_id, "event": "heartbeat"}, False
+    else:
+        raise ProtocolError(f"host cannot send {frame.kind.name} frames")
+    return dispatch_request(request)
+
+
+def serve_framed_stdio() -> int:
+    for frame in read_frames(sys.stdin.buffer):
+        request_id = int(frame.sequence)
+        try:
+            response, should_quit = dispatch_frame(frame)
+            emit(response, session=frame.session, sequence=frame.sequence)
+            if should_quit:
+                return 0
+        except Exception as exc:
+            emit(
+                {"id": request_id, "error": str(exc)},
+                session=frame.session,
+                sequence=frame.sequence,
+            )
+    return 0
 
 
 def main() -> int:
@@ -659,60 +806,21 @@ def main() -> int:
             PARAFORMER_ADAPTER is not None and PARAFORMER_ADAPTER.is_seaco
         ):
             refresh_hotword_catalog()
+        capabilities = worker_capabilities()
         emit({
             "event": "ready",
             "model": MODEL_NAME,
             "backend": MODEL_BACKEND,
             "role": MODEL_ROLE,
-            "streaming": bool(
-                PARAFORMER_ADAPTER is not None and PARAFORMER_ADAPTER.is_streaming
-            ),
-            "punctuation": bool(
-                PARAFORMER_ADAPTER is not None and PARAFORMER_ADAPTER.punctuation_source is not None
-            ),
+            "streaming": capabilities.streaming == StreamingMode.NATIVE,
+            "punctuation": capabilities.punctuation,
+            "capabilities": capabilities.as_dict(),
         })
     except Exception as exc:
         emit({"event": "fatal", "error": str(exc)})
         return 1
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        request_id = 0
-        try:
-            request = json.loads(line)
-            request_id = int(request.get("id", 0))
-            if request.get("command") == "quit":
-                emit({"event": "bye"})
-                return 0
-            if request.get("command") == "feedback":
-                emit(feedback_request(request))
-                continue
-            if request.get("command") == "list_learning_rules":
-                emit(learning_rules_request(request_id))
-                continue
-            if request.get("command") == "rollback_learning_rule":
-                emit(rollback_learning_rule_request(request))
-                continue
-            if request.get("command") == "refresh_hotword_catalog":
-                emit(refresh_hotword_catalog(request_id))
-                continue
-            if request.get("command") == "stream_start":
-                emit(stream_start_request(request))
-                continue
-            if request.get("command") == "stream_chunk":
-                emit(stream_chunk_request(request))
-                continue
-            if request.get("command") == "stream_cancel":
-                emit(stream_cancel_request(request))
-                continue
-            if request.get("command") != "transcribe":
-                raise ValueError("不支持的命令")
-            emit(transcribe_request(request))
-        except Exception as exc:
-            emit({"id": request_id, "error": str(exc)})
-    return 0
+    return serve_framed_stdio()
 
 
 if __name__ == "__main__":

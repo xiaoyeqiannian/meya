@@ -69,6 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--language", default="Chinese")
+    parser.add_argument(
+        "--run-id",
+        default="",
+        help="Store this run under a distinct engine id (for example qwen3-1.7b-auto).",
+    )
     parser.add_argument("--funasr-device", default="cpu")
     return parser.parse_args()
 
@@ -100,6 +105,23 @@ def edit_distance(left: str, right: str) -> int:
 def cer(reference: str, hypothesis: str) -> float:
     expected = normalize(reference)
     return edit_distance(expected, normalize(hypothesis)) / max(1, len(expected))
+
+
+_MIXED_TOKEN = re.compile(
+    r"[A-Za-z0-9]+(?:[+._/-][A-Za-z0-9]+)*|[\u3400-\u4DBF\u4E00-\u9FFF]"
+)
+
+
+def mixed_tokens(text: str) -> list[str]:
+    """Tokenize Chinese by character and ASCII terms by word for code-switch MER."""
+    normalized = unicodedata.normalize("NFKC", text or "")
+    return [match.group(0).casefold() for match in _MIXED_TOKEN.finditer(normalized)]
+
+
+def mer(reference: str, hypothesis: str) -> float:
+    """Mixed Error Rate: Chinese characters and English terms are equal units."""
+    expected = mixed_tokens(reference)
+    return edit_distance(expected, mixed_tokens(hypothesis)) / max(1, len(expected))
 
 
 def percentile(values: list[float], quantile: float) -> float | None:
@@ -219,7 +241,10 @@ class FinalEngine:
                 itn=True,
             )
             return str((result[0] if result else {}).get("text") or "").strip()
-        result = self.model.generate(str(path), language=self.language)
+        options = {}
+        if self.language.strip().casefold() not in {"", "auto", "detect", "none"}:
+            options["language"] = self.language
+        result = self.model.generate(str(path), **options)
         return str(result.text or "").strip()
 
     def warmup(self, path: Path, audio: np.ndarray) -> float:
@@ -229,6 +254,7 @@ class FinalEngine:
 
 
 def run_engine(args: argparse.Namespace) -> None:
+    run_id = args.run_id.strip() or args.engine
     result_path = args.output / "results.jsonl"
     existing = latest_rows(read_jsonl(result_path))
     recordings = sorted(args.recordings.glob("*.wav"))
@@ -245,9 +271,9 @@ def run_engine(args: argparse.Namespace) -> None:
         completed: set[tuple[str, str]] = set()
     else:
         completed = set(existing)
-    pending = [path for path in recordings if (path.name, args.engine) not in completed]
+    pending = [path for path in recordings if (path.name, run_id) not in completed]
     if not pending:
-        print(f"{args.engine}: nothing to do")
+        print(f"{run_id}: nothing to do")
         return
     model_id = {
         "funasr-nano": args.funasr_model,
@@ -270,8 +296,9 @@ def run_engine(args: argparse.Namespace) -> None:
                 "schema_version": 1,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "audio": path.name,
-                "engine": args.engine,
+                "engine": run_id,
                 "model": model_id,
+                "language_mode": args.language,
                 "duration": round(duration, 4),
                 "raw_text": text,
                 "final_text": text,
@@ -285,23 +312,26 @@ def run_engine(args: argparse.Namespace) -> None:
                 "schema_version": 1,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "audio": path.name,
-                "engine": args.engine,
+                "engine": run_id,
                 "model": model_id,
+                "language_mode": args.language,
                 "duration": 0.0,
                 "error": f"{type(error).__name__}: {error}",
                 "elapsed": round(time.perf_counter() - started, 4),
             }
         append_row(result_path, row)
         print(
-            f"[{index}/{len(pending)}] {args.engine} {path.name} "
+            f"[{index}/{len(pending)}] {run_id} {path.name} "
             f"{row['elapsed']:.2f}s {row.get('final_text') or row.get('error') or '[silence]'}",
             flush=True,
         )
     run_metrics = {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "engine": args.engine,
+        "engine": run_id,
+        "base_engine": args.engine,
         "model": model_id,
+        "language_mode": args.language,
         "model_path": str(engine.snapshot),
         "model_bytes": directory_bytes(engine.snapshot),
         "load_elapsed": round(engine.load_elapsed, 4),
@@ -312,7 +342,7 @@ def run_engine(args: argparse.Namespace) -> None:
         "processed": len(pending),
     }
     args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / f"run-{args.engine}.json").write_text(
+    (args.output / f"run-{run_id}.json").write_text(
         json.dumps(run_metrics, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -338,10 +368,23 @@ def load_references(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def english_terms(text: str) -> list[str]:
-    return [
-        value for value in re.findall(r"[A-Za-z][A-Za-z0-9+._/-]*", text)
-        if len(normalize(value)) >= 2
+    values = [
+        value.rstrip("._/-")
+        for value in re.findall(r"[A-Za-z][A-Za-z0-9+#._/-]*", text)
     ]
+    return [
+        value for value in values
+        if len(re.sub(r"[^A-Za-z0-9]", "", value)) >= 2
+        or value.endswith(("++", "#"))
+    ]
+
+
+def english_term_hit(text: str, term: str) -> bool:
+    expected = unicodedata.normalize("NFKC", term).casefold()
+    return expected in {
+        unicodedata.normalize("NFKC", candidate).casefold()
+        for candidate in english_terms(text)
+    }
 
 
 def engine_metrics(
@@ -362,19 +405,19 @@ def engine_metrics(
     technical = [row for row in paired if row.get("technical")]
     plain = [row for row in paired if not row.get("technical")]
 
-    def weak(group: list[dict[str, Any]]) -> float | None:
+    def weak(group: list[dict[str, Any]], metric=cer) -> float | None:
         values = [
-            cer(str(row["accepted_text"]), str(by_audio[str(row["audio"])].get("final_text") or ""))
+            metric(str(row["accepted_text"]), str(by_audio[str(row["audio"])].get("final_text") or ""))
             for row in group
         ]
         return statistics.fmean(values) if values else None
 
     term_total = term_hits = 0
     for row in paired:
-        hypothesis = normalize(str(by_audio[str(row["audio"])].get("final_text") or ""))
+        hypothesis = str(by_audio[str(row["audio"])].get("final_text") or "")
         for term in english_terms(str(row.get("accepted_text") or "")):
             term_total += 1
-            term_hits += normalize(term) in hypothesis
+            term_hits += english_term_hit(hypothesis, term)
     confirmed = [
         row for audio, value in references.items()
         if value.get("reference") and (row := by_audio.get(audio))
@@ -390,10 +433,13 @@ def engine_metrics(
         "mean_rtf": statistics.fmean(rtf) if rtf else None,
         "weak_rows": len(paired),
         "weak_cer": weak(paired),
+        "weak_mer": weak(paired, mer),
         "technical_rows": len(technical),
         "technical_cer": weak(technical),
+        "technical_mer": weak(technical, mer),
         "plain_rows": len(plain),
         "plain_cer": weak(plain),
+        "plain_mer": weak(plain, mer),
         "english_term_hits": term_hits,
         "english_term_total": term_total,
         "english_term_recall": term_hits / term_total if term_total else None,
