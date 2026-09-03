@@ -2953,6 +2953,13 @@ private final class PendingFeedbackObservation {
 }
 
 private final class LiveDraftInserter {
+    // Electron accessibility trees can synchronously re-render the whole
+    // composer when AXSelectedTextAttribute is replaced. Keep short edits on
+    // that path, but use the non-blocking keyboard path for long final text so
+    // the host editor (for example Kiro) never stalls while committing.
+    private static let maxDirectAccessibilityCommitUTF16 = 160
+    private static let unicodeEventChunkLength = 20
+
     private var target: AXUIElement?
     private var originalRange = CFRange(location: 0, length: 0)
     private var originalText = ""
@@ -3020,6 +3027,10 @@ private final class LiveDraftInserter {
 
     func commit(_ text: String) -> Bool {
         guard isReady, !text.isEmpty else { return false }
+        if text.utf16.count > Self.maxDirectAccessibilityCommitUTF16 {
+            writeDiagnostic(state: "long_final_keyboard_commit")
+            return replaceUsingKeyboard(with: text, finish: true)
+        }
         return replaceDraft(with: text, finish: true)
     }
 
@@ -3286,19 +3297,38 @@ private final class LiveDraftInserter {
     private func postUnicode(_ text: String) -> Bool {
         guard !text.isEmpty else { return true }
         guard let source = CGEventSource(stateID: .combinedSessionState),
-              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+              !text.isEmpty
         else { return false }
-        markAsMeyaInjected(keyDown)
-        markAsMeyaInjected(keyUp)
+
+        // CGEvent's Unicode payload is limited on some macOS versions. Send
+        // bounded chunks so a long final sentence is complete and never turns
+        // into a single oversized synchronous host-editor operation.
         let units = Array(text.utf16)
-        units.withUnsafeBufferPointer { buffer in
-            guard let baseAddress = buffer.baseAddress else { return }
-            keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
-            keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+        var offset = 0
+        while offset < units.count {
+            var end = min(units.count, offset + Self.unicodeEventChunkLength)
+            // Do not split a UTF-16 surrogate pair between events.
+            if end < units.count,
+               units[end - 1] >= 0xD800,
+               units[end - 1] <= 0xDBFF {
+                end -= 1
+            }
+            guard end > offset,
+                  let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                  let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+            else { return false }
+            let chunk = Array(units[offset..<end])
+            chunk.withUnsafeBufferPointer { buffer in
+                guard let baseAddress = buffer.baseAddress else { return }
+                keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+                keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+            }
+            markAsMeyaInjected(keyDown)
+            markAsMeyaInjected(keyUp)
+            keyDown.post(tap: .cghidEventTap)
+            keyUp.post(tap: .cghidEventTap)
+            offset = end
         }
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
         return true
     }
 
@@ -4418,10 +4448,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 appName: recordingAppName
             )
         }
-        // Try immediately and once more after Electron has processed the
-        // posted Unicode event. A captured baseline makes later edits fully
-        // automatic even though opening the status menu changes app focus.
-        liveDraftInserter.captureFeedbackBaseline()
+        // Let Electron process the posted Unicode event before querying its
+        // accessibility tree. An immediate AX read can synchronously block a
+        // large editor just after final insertion.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             self?.liveDraftInserter.captureFeedbackBaseline()
         }

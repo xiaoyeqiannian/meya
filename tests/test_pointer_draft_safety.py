@@ -18,6 +18,10 @@ def main() -> int:
     assert "targetStillFocused(target), ownsCurrentDraft(target)" in swift
     assert "setSelectedRange(ownedRange, on: target) && postUnicode(replacement)" in swift
     assert "unicode_fallback_draft_moved" in swift
+    assert "maxDirectAccessibilityCommitUTF16 = 160" in swift
+    assert "return replaceUsingKeyboard(with: text, finish: true)" in swift
+    assert "unicodeEventChunkLength = 20" in swift
+    assert "Let Electron process the posted Unicode event" in swift
     print("pointer draft safety tests passed")
     return 0
 
