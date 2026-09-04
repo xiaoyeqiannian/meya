@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
 import wave
+from array import array
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from training_data import (  # noqa: E402
+    analyze_audio_quality,
     TrainingSampleRejected,
     TrainingSampleStore,
     extract_corrected_utterance,
@@ -40,11 +43,12 @@ def main() -> int:
         recordings = root / "recordings/voice-input"
         recordings.mkdir(parents=True)
         audio = recordings / "sample.wav"
+        pcm = array("h", [int(0.1 * 32767 * math.sin(2 * math.pi * 220 * i / 16_000)) for i in range(16_000)])
         with wave.open(str(audio), "wb") as output:
             output.setnchannels(1)
             output.setsampwidth(2)
             output.setframerate(16_000)
-            output.writeframes(b"\0\0" * 16_000)
+            output.writeframes(pcm.tobytes())
         store = TrainingSampleStore(root / "user-data", recordings)
         values = {
             "expected_text": "把奈达斯部署到K八S",
@@ -61,6 +65,8 @@ def main() -> int:
         assert len(rows) == 1
         assert rows[0]["reference"] == "把 Nydus 部署到 K8s"
         assert rows[0]["training_ready"] is True
+        assert rows[0]["quality_status"] == "clean"
+        assert rows[0]["rms_dbfs"] < -15
         assert "app_name" not in rows[0]
         assert rows[0]["duration"] == 1.0
         assert (store.root / rows[0]["audio"]).is_file()
@@ -79,6 +85,15 @@ def main() -> int:
         outside = root / "outside.wav"
         outside.write_bytes(audio.read_bytes())
         expect_rejected(lambda: store.save_feedback(**{**values, "audio_path": str(outside)}))
+
+    quiet = analyze_audio_quality([int(0.001 * 32767)] * 16_000)
+    assert quiet["quality_status"] == "reject"
+    assert "rms_below_-35_dbfs" in quiet["quality_reasons"]
+    clipped = [0] * 16_000
+    clipped[:32] = [32767] * 32
+    clipped_quality = analyze_audio_quality(clipped)
+    assert clipped_quality["quality_status"] == "reject"
+    assert "clipping_ratio_over_0.1_percent" in clipped_quality["quality_reasons"]
 
     print("training data tests passed")
     return 0

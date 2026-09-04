@@ -166,11 +166,27 @@ Parafomer	Paraformer
 - 尝试从完整输入框内容中只提取该段语音对应的修改句；无法分离的完整修改只作为待复核候选；
 - 可靠对齐的修改直接标记为 `user_confirmed`；无法对齐或改动幅度异常的记录不丢弃，标记为 `needs_review`，不会直接用于训练；
 - 使用硬链接保留对应 WAV（不支持时自动回退为复制），避免无谓占用双份空间；
-- 以 `user_confirmed` 标记写入本地 JSONL，相同音频和相同标签重复学习不会产生重复样本。
+- 以 `user_confirmed` 标记写入本地 JSONL，相同音频和相同标签重复学习不会产生重复样本；
+- 保存样本时会同步记录 `rms_dbfs`、`peak_dbfs`、`clipping_ratio`、有效语音比例和噪声底估计；
+- 削波比例达到 `0.1%` 的录音自动标记为 `reject`，RMS 低于推荐值 `-24 dBFS` 的录音标记为
+  `needs_review`，只有音频和文本都通过检查才会标记 `training_ready`。
 
 样本保存在 `~/Library/Application Support/Meya/training-data/`：`audio/` 是录音，
 `samples.jsonl` 是用户确认文字、原始识别、复核状态、模型标识和音频相对路径。可从
 「管理个人词库… → 训练数据…」直接查看或删除。
+
+可以随时对已有样本重新做本地质量审计（默认只读）：
+
+```bash
+./.venv/bin/python scripts/audit_training_data.py
+```
+
+需要将质量字段写回清单时，使用 `--apply`；脚本会先保存 `samples.jsonl.bak`，不会删除或修改 WAV
+及任何转写文本：
+
+```bash
+./.venv/bin/python scripts/audit_training_data.py --apply
+```
 
 ## 构建本机安装包
 
