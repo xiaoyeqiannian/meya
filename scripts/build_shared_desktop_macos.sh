@@ -35,8 +35,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --sign - "$APP"
-codesign --verify --strict "$APP"
+# A self-contained .NET publish contains managed assemblies inside the app
+# bundle. Sign the nested bundle as one unit so strict verification also works
+# on a clean macOS installation.
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict "$APP"
 
 if [[ "${MEYA_SKIP_UI_SMOKE:-0}" != "1" ]]; then
   "$APP/Contents/MacOS/Meya.Desktop" --overlay-smoke

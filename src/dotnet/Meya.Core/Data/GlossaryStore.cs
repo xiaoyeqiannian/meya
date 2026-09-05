@@ -214,7 +214,7 @@ public sealed class GlossaryStore
     }
 
     private static IEnumerable<string> SplitVariants(string value) =>
-        value.Split(['、', ',', '，', ';', '；', '|'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        value.Split(new[] { '、', ',', '，', ';', '；', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(item => item.Length > 0);
 
     private static string JoinVariants(params string[] values) =>
