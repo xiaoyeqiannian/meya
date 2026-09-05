@@ -46,7 +46,7 @@ cp "$build_dir/Meya" "$app_dir/Contents/MacOS/Meya"
 cp "$build_dir/register-input-method" "$app_dir/Contents/Helpers/register-input-method"
 cp "$project_dir/app/Info.plist" "$app_dir/Contents/Info.plist"
 /usr/bin/plutil -replace LocalVoiceProjectPath -string "$project_dir" "$app_dir/Contents/Info.plist"
-"$build_dir/generate-icon" "$app_dir/Contents/Resources/MeyaInputSource-v3.pdf" 512 app
+"$build_dir/generate-icon" "$app_dir/Contents/Resources/MeyaInputSource-v3.pdf" 512 app "$project_dir/app/MayaMascot3D.png"
 "$build_dir/generate-icon" "$app_dir/Contents/Resources/MeyaStatus-v5.pdf" 128 template
 cp "$project_dir/app/MayaMascot3D.png" "$app_dir/Contents/Resources/MayaMascot3D.png"
 
@@ -66,7 +66,7 @@ for spec in \
   "1024 icon_512x512@2x.png"; do
   size="${spec%% *}"
   name="${spec#* }"
-  "$build_dir/generate-icon" "$iconset_dir/$name" "$size" app
+  "$build_dir/generate-icon" "$iconset_dir/$name" "$size" app "$project_dir/app/MayaMascot3D.png"
 done
 "$build_dir/pack-icns" "$iconset_dir" "$app_dir/Contents/Resources/Meya-v3.icns"
 mkdir -p "$app_dir/Contents/Resources/zh_CN.lproj"
