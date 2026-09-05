@@ -1,6 +1,6 @@
 using Avalonia;
 
-namespace Meya.Windows;
+namespace Meya.Desktop;
 
 internal static class Program
 {

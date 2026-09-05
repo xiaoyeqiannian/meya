@@ -1,136 +1,124 @@
+using System.Runtime.InteropServices;
+using Avalonia;
+using Avalonia.Platform;
+using Meya.Core;
+using Meya.UI.Views;
+
 namespace Meya.Windows;
 
-internal sealed class OverlayForm : Form
+internal sealed class OverlayForm : IDisposable
 {
-    private readonly Label _statusLabel;
-    private readonly Label _draftLabel;
+    private readonly OverlayWindow _window = new();
 
     internal OverlayForm()
     {
-        FormBorderStyle = FormBorderStyle.None;
-        ShowInTaskbar = false;
-        TopMost = true;
-        StartPosition = FormStartPosition.Manual;
-        BackColor = Color.FromArgb(32, 32, 36);
-        ForeColor = Color.White;
-        Size = new Size(360, 78);
-        Padding = new Padding(14, 10, 14, 10);
-
-        _statusLabel = new Label
-        {
-            AutoSize = false,
-            Dock = DockStyle.Top,
-            Height = 22,
-            ForeColor = Color.FromArgb(190, 210, 220),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Font = new Font((SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont).FontFamily, 9, FontStyle.Regular),
-        };
-        _draftLabel = new Label
-        {
-            AutoSize = false,
-            Dock = DockStyle.Fill,
-            ForeColor = Color.White,
-            TextAlign = ContentAlignment.MiddleLeft,
-            AutoEllipsis = false,
-            Font = new Font((SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont).FontFamily, 11, FontStyle.Regular),
-        };
-        Controls.Add(_draftLabel);
-        Controls.Add(_statusLabel);
+        _window.AnchorPointProvider = CursorPoint;
+        _window.NativeWindowReady += ConfigureNativeWindow;
     }
 
-    protected override bool ShowWithoutActivation => true;
+    internal void ShowState(string text) =>
+        _window.ShowPresentation(OverlayPresentation.Message(text));
 
-    protected override CreateParams CreateParams
+    internal void ShowRecording(bool streamingAvailable) =>
+        _window.ShowPresentation(OverlayPresentation.Recording("右 Ctrl", streamingAvailable));
+
+    internal void ShowDraft(string text, bool finalizing = false) =>
+        _window.ShowPresentation(OverlayPresentation.Draft(text, "右 Ctrl", finalizing));
+
+    internal void ShowRecognizing(string? draft) =>
+        _window.ShowPresentation(string.IsNullOrWhiteSpace(draft)
+            ? OverlayPresentation.Message("正在使用 SeACo 最终定稿")
+            : OverlayPresentation.Draft(draft, "右 Ctrl", finalizing: true));
+
+    internal void ShowFinal(string text, bool inserted) =>
+        _window.ShowPresentation(OverlayPresentation.Final(text, inserted));
+
+    internal void UpdateAudioLevel(float level) =>
+        _window.UpdateAudioLevel(level);
+
+    internal void HideState() =>
+        _window.ShowPresentation(OverlayPresentation.Hidden());
+
+    public void Dispose()
     {
-        get
+        _window.NativeWindowReady -= ConfigureNativeWindow;
+        _window.Close();
+    }
+
+    private static PixelPoint? CursorPoint()
+    {
+        return GetCursorPos(out NativePoint point)
+            ? new PixelPoint(point.X, point.Y)
+            : null;
+    }
+
+    private static void ConfigureNativeWindow(OverlayWindow window)
+    {
+        const int GwlExStyle = -20;
+        const long WsExTransparent = 0x00000020L;
+        const long WsExToolWindow = 0x00000080L;
+        const long WsExNoActivate = 0x08000000L;
+        const int DwmwaWindowCornerPreference = 33;
+        const int DwmwaBorderColor = 34;
+        const int DwmwcpDoNotRound = 1;
+        int dwmColorNone = unchecked((int)0xFFFFFFFE);
+        IPlatformHandle? handle = window.TryGetPlatformHandle();
+        if (handle is null || handle.Handle == IntPtr.Zero)
         {
-            const int WsExTransparent = 0x00000020;
-            const int WsExToolWindow = 0x00000080;
-            const int WsExNoActivate = 0x08000000;
-            CreateParams value = base.CreateParams;
-            value.ExStyle |= WsExTransparent | WsExToolWindow | WsExNoActivate;
-            return value;
+            return;
         }
+        nint style = GetWindowLongPtr(handle.Handle, GwlExStyle);
+        SetWindowLongPtr(
+            handle.Handle,
+            GwlExStyle,
+            style | (nint)(WsExTransparent | WsExToolWindow | WsExNoActivate));
+
+        int cornerPreference = DwmwcpDoNotRound;
+        _ = DwmSetWindowAttribute(
+            handle.Handle,
+            DwmwaWindowCornerPreference,
+            ref cornerPreference,
+            sizeof(int));
+        _ = DwmSetWindowAttribute(
+            handle.Handle,
+            DwmwaBorderColor,
+            ref dwmColorNone,
+            sizeof(int));
     }
 
-    internal void ShowState(string text)
+    private static nint GetWindowLongPtr(nint window, int index) =>
+        IntPtr.Size == 8 ? GetWindowLongPtr64(window, index) : GetWindowLong32(window, index);
+
+    private static nint SetWindowLongPtr(nint window, int index, nint value) =>
+        IntPtr.Size == 8 ? SetWindowLongPtr64(window, index, value) : SetWindowLong32(window, index, value);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
     {
-        _statusLabel.Text = string.Empty;
-        _statusLabel.Visible = false;
-        _draftLabel.Text = text;
-        Size = new Size(320, 54);
-        ShowAtWorkingArea();
+        internal int X;
+        internal int Y;
     }
 
-    internal void ShowRecording(bool streamingAvailable)
-    {
-        _statusLabel.Visible = false;
-        _statusLabel.Text = string.Empty;
-        _draftLabel.Text = streamingAvailable
-            ? "正在听 · 松开右 Ctrl 完成"
-            : "正在录音 · 松开右 Ctrl 完成";
-        Size = new Size(320, 54);
-        ShowAtWorkingArea();
-    }
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetCursorPos(out NativePoint point);
 
-    internal void ShowDraft(string text, bool finalizing = false)
-    {
-        _statusLabel.Visible = true;
-        _statusLabel.Text = finalizing
-            ? "正在使用 SeACo 最终定稿"
-            : "实时识别 · 松开右 Ctrl 完成";
-        _draftLabel.Text = LatestText(text);
-        Size = new Size(480, 120);
-        ShowAtWorkingArea();
-    }
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(
+        nint window,
+        int attribute,
+        ref int attributeValue,
+        int attributeSize);
 
-    internal void ShowRecognizing(string? draft)
-    {
-        if (string.IsNullOrWhiteSpace(draft))
-        {
-            _statusLabel.Visible = false;
-            _statusLabel.Text = string.Empty;
-            _draftLabel.Text = "正在使用 SeACo 最终定稿";
-            Size = new Size(320, 54);
-        }
-        else
-        {
-            ShowDraft(draft, finalizing: true);
-        }
-        ShowAtWorkingArea();
-    }
 
-    internal void ShowFinal(string text, bool inserted)
-    {
-        _statusLabel.Visible = true;
-        _statusLabel.Text = inserted ? "识别结果已输入" : "识别结果已复制";
-        _draftLabel.Text = LatestText(text);
-        Size = new Size(480, 120);
-        ShowAtWorkingArea();
-    }
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern nint GetWindowLongPtr64(nint window, int index);
 
-    internal void HideState() => Hide();
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+    private static extern nint GetWindowLong32(nint window, int index);
 
-    private static string LatestText(string text)
-    {
-        const int MaximumVisibleCharacters = 96;
-        string value = text.Trim();
-        return value.Length <= MaximumVisibleCharacters
-            ? value
-            : value[^MaximumVisibleCharacters..];
-    }
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    private static extern nint SetWindowLongPtr64(nint window, int index, nint value);
 
-    private void ShowAtWorkingArea()
-    {
-        Rectangle area = Screen.FromPoint(Cursor.Position).WorkingArea;
-        Location = new Point(area.Right - Width - 24, area.Bottom - Height - 24);
-        if (!Visible)
-        {
-            Show();
-        }
-        else
-        {
-            Invalidate();
-        }
-    }
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+    private static extern nint SetWindowLong32(nint window, int index, nint value);
 }

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Meya.Windows;
 
@@ -9,6 +10,9 @@ internal static class TextInjector
     private const uint KeyEventUnicode = 0x0004;
     private const ushort VkControl = 0x11;
     private const ushort VkV = 0x56;
+    private const uint CfUnicodeText = 13;
+    private const uint GmemMoveable = 0x0002;
+    private const uint GmemZeroInit = 0x0040;
 
     internal static bool Insert(string text)
     {
@@ -27,17 +31,57 @@ internal static class TextInjector
 
     private static bool TrySetClipboard(string text)
     {
+        byte[] bytes = Encoding.Unicode.GetBytes(text + '\0');
         for (int attempt = 0; attempt < 5; attempt++)
         {
-            try
-            {
-                Clipboard.SetText(text, TextDataFormat.UnicodeText);
-                return true;
-            }
-            catch (ExternalException)
+            if (!OpenClipboard(IntPtr.Zero))
             {
                 Thread.Sleep(40 * (attempt + 1));
+                continue;
             }
+
+            nint memory = IntPtr.Zero;
+            bool transferred = false;
+            try
+            {
+                if (!EmptyClipboard())
+                {
+                    continue;
+                }
+                memory = GlobalAlloc(GmemMoveable | GmemZeroInit, (nuint)bytes.Length);
+                if (memory == IntPtr.Zero)
+                {
+                    continue;
+                }
+                nint pointer = GlobalLock(memory);
+                if (pointer == IntPtr.Zero)
+                {
+                    continue;
+                }
+                try
+                {
+                    Marshal.Copy(bytes, 0, pointer, bytes.Length);
+                }
+                finally
+                {
+                    GlobalUnlock(memory);
+                }
+                transferred = SetClipboardData(CfUnicodeText, memory) != IntPtr.Zero;
+                if (transferred)
+                {
+                    memory = IntPtr.Zero;
+                    return true;
+                }
+            }
+            finally
+            {
+                if (!transferred && memory != IntPtr.Zero)
+                {
+                    GlobalFree(memory);
+                }
+                CloseClipboard();
+            }
+            Thread.Sleep(40 * (attempt + 1));
         }
         return false;
     }
@@ -140,4 +184,28 @@ internal static class TextInjector
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint count, Input[] inputs, int size);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool OpenClipboard(nint owner);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool CloseClipboard();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EmptyClipboard();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint SetClipboardData(uint format, nint memory);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint GlobalAlloc(uint flags, nuint bytes);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint GlobalLock(nint memory);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalUnlock(nint memory);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint GlobalFree(nint memory);
 }

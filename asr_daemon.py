@@ -273,9 +273,18 @@ def feedback_request(request: dict) -> dict:
     training_sample_error: str | None = None
     if bool(request.get("explicit", False)):
         try:
+            requested_audio = Path(str(request.get("audio_path") or "")).expanduser().resolve()
+            allowed_roots = (
+                (glossary_path.parent / "recordings" / "voice-input").resolve(),
+                (PROJECT_DIR / "recordings" / "voice-input").resolve(),
+            )
+            allowed_audio_root = next(
+                (root for root in allowed_roots if requested_audio.is_relative_to(root)),
+                allowed_roots[0],
+            )
             training_sample = TrainingSampleStore(
                 glossary_path.parent,
-                PROJECT_DIR / "recordings" / "voice-input",
+                allowed_audio_root,
             ).save_feedback(
                 expected_text=expected,
                 edited_text=edited,

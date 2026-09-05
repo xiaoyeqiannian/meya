@@ -22,6 +22,8 @@ internal sealed class StreamingPcm16Converter
     private byte[] _remainder = [];
     private double _sourcePosition;
 
+    internal float CurrentLevel { get; private set; } = 0.03f;
+
     internal StreamingPcm16Converter(WaveFormat format)
     {
         ArgumentNullException.ThrowIfNull(format);
@@ -67,6 +69,8 @@ internal sealed class StreamingPcm16Converter
         _remainder = combined.AsSpan(completeBytes).ToArray();
 
         int sampleBytes = _bitsPerSample / 8;
+        double sumSquares = 0;
+        int frameCount = 0;
         for (int frameOffset = 0; frameOffset < completeBytes; frameOffset += _blockAlign)
         {
             float sum = 0;
@@ -75,7 +79,16 @@ internal sealed class StreamingPcm16Converter
                 int offset = frameOffset + channel * sampleBytes;
                 sum += DecodeSample(combined.AsSpan(offset, sampleBytes));
             }
-            _source.Add(sum / _channels);
+            float mono = sum / _channels;
+            _source.Add(mono);
+            sumSquares += mono * mono;
+            frameCount++;
+        }
+        if (frameCount > 0)
+        {
+            double rms = Math.Sqrt(sumSquares / frameCount);
+            double decibels = 20 * Math.Log10(Math.Max(rms, 0.000_01));
+            CurrentLevel = (float)Math.Clamp((decibels + 55) / 45, 0, 1);
         }
         Resample(flush: false);
         return TakeCompleteChunks();
