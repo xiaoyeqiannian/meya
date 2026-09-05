@@ -275,6 +275,31 @@ export HF_HUB_CACHE="$HF_HOME/hub"
   --model mlx-community/whisper-large-v3-mlx
 ```
 
+## Windows（预览）
+
+Windows 客户端基于 .NET 8、Avalonia、WASAPI 和与 macOS 共用的 IPC v2 二进制帧协议；菜单、浮层和状态模型位于共享的 Avalonia/Core 层，Windows 仅替换音频捕获、全局按键和文本注入适配器。
+短按右 `Ctrl` 不会开始录音；按住约 350 ms 后开始，Paraformer Streaming 的实时结果会动态显示在不可激活、鼠标穿透的浮层中，但不会写入输入框；松开后由 SeACo 最终定稿并一次性写入原输入框。
+若录音期间前台窗口变化，结果只复制到剪贴板，避免写入错误窗口。
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\bootstrap_windows.ps1
+.\scripts\download_paraformer_windows.ps1
+.\scripts\build_windows.ps1
+.\scripts\install_windows.ps1 -NoBuild
+```
+
+安装目录为 `%LOCALAPPDATA%\Programs\Meya`，用户词库、录音和诊断日志位于
+`%LOCALAPPDATA%\Meya`。Windows 同时运行 Paraformer Streaming preview worker 和 SeACo final worker：
+WASAPI 音频会实时转换为 16 kHz 单声道 PCM16，每 7,680 samples 通过 IPC v2 推送；
+partial 不写入输入框，只持续刷新在不可激活、鼠标穿透的浮层中；长文本始终显示最新一段，松键后的 preview 尾包和最终 SeACo 结果也会更新浮层。partial 同时在内部保留为最终模型失败时的回退结果；松开物理右 `Ctrl` 后才向录音开始时捕获的前台窗口提交一次文字，因此录音期间不会选择文本、改变输入框光标或合成右 `Ctrl` key-down。
+
+构建会执行 C# 版 golden fixture、帧分片/噪声重同步和共享 session trace 测试：
+
+```powershell
+.\scripts\build_windows.ps1
+```
+
 ## 重建环境
 
 ```bash

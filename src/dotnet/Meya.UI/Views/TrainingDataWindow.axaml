@@ -1,0 +1,26 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Meya.UI.Views.TrainingDataWindow"
+        x:CompileBindings="False"
+        Title="麦芽 Meya · 训练数据"
+        Width="980" Height="540" WindowStartupLocation="CenterScreen">
+  <Grid Margin="24" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="10">
+    <TextBlock Grid.Row="0" Text="本地微调样本" FontSize="24" FontWeight="SemiBold" />
+    <TextBlock Grid.Row="1" Text="样本只保存在本机；可训练表示音频和确认文本已可靠对齐，待复核样本不会直接用于训练。" Foreground="#BFC9D4" />
+    <DataGrid Grid.Row="2" ItemsSource="{Binding Samples}" SelectedItem="{Binding SelectedSample}"
+              AutoGenerateColumns="False" IsReadOnly="True" GridLinesVisibility="All">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="时间" Width="2*" Binding="{Binding CreatedAt}" />
+        <DataGridTextColumn Header="确认文字" Width="3*" Binding="{Binding Reference}" />
+        <DataGridTextColumn Header="原始识别" Width="3*" Binding="{Binding Hypothesis}" />
+        <DataGridTextColumn Header="状态" Width="*" Binding="{Binding StatusText}" />
+        <DataGridTextColumn Header="模型" Width="2*" Binding="{Binding Model}" />
+      </DataGrid.Columns>
+    </DataGrid>
+    <Grid Grid.Row="3" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+      <Button Grid.Column="0" Content="打开训练数据目录…" Click="OpenFolder" />
+      <TextBlock Grid.Column="1" x:Name="StatusText" VerticalAlignment="Center" Foreground="#BFC9D4" />
+      <Button Grid.Column="2" Content="删除所选样本" Click="DeleteSelected" />
+    </Grid>
+  </Grid>
+</Window>
