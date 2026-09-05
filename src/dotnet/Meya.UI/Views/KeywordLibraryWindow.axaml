@@ -1,0 +1,36 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Meya.UI.Views.KeywordLibraryWindow"
+        x:CompileBindings="False"
+        Title="麦芽 Meya · 个人词库"
+        Width="1160" Height="560" MinWidth="980" MinHeight="440"
+        WindowStartupLocation="CenterScreen">
+  <Grid Margin="24" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="12">
+    <TextBlock Grid.Row="0" Text="个人术语词典" FontSize="24" FontWeight="SemiBold" />
+    <TextBlock Grid.Row="1" TextWrapping="Wrap" Foreground="#BFC9D4"
+               Text="标准写法是最终输出；发音形式填写您真正说出的读法，例如 NovaKit 可填“诺瓦套件”。系统只把 SeACo 能编码的形式送入热词模型；常见错词仅作少量兜底，不需要穷举。" />
+    <DataGrid Grid.Row="2" ItemsSource="{Binding Entries}" SelectedItem="{Binding SelectedEntry}"
+              AutoGenerateColumns="False" GridLinesVisibility="All"
+              IsReadOnly="False">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="标准写法" Width="2*" Binding="{Binding Canonical}" />
+        <DataGridTextColumn Header="实际发音形式" Width="2*" Binding="{Binding Pronunciations}" />
+        <DataGridTextColumn Header="少量兜底错词" Width="2*" Binding="{Binding Corrections}" />
+        <DataGridTextColumn Header="建议发音（点击采纳）" Width="2*" Binding="{Binding Suggestion}" IsReadOnly="True" />
+        <DataGridTextColumn Header="热词状态" Width="*" Binding="{Binding HotwordStatus}" IsReadOnly="True" />
+      </DataGrid.Columns>
+    </DataGrid>
+    <Grid Grid.Row="3" ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,*,Auto" ColumnSpacing="8">
+      <Button Grid.Column="0" Content="＋ 添加术语" Click="AddTerm" />
+      <Button Grid.Column="1" Content="－ 删除所选" Click="RemoveSelected" />
+      <Button Grid.Column="2" Content="导入 TXT / CSV / TSV…" Click="ImportTerms" />
+      <Button Grid.Column="3" Content="采纳所选建议" Click="AcceptSuggestion" />
+      <Button Grid.Column="4" Content="自动学习规则…" Click="OpenLearningRules" />
+      <Button Grid.Column="5" Content="训练数据…" Click="OpenTrainingData" />
+      <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center">
+        <TextBlock x:Name="StatusText" Foreground="#BFC9D4" />
+      </StackPanel>
+      <Button Grid.Column="7" Content="保存并立即生效" Classes="accent" Click="SaveTerms" />
+    </Grid>
+  </Grid>
+</Window>

@@ -1,0 +1,28 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Meya.UI.Views.ModelManagerWindow"
+        x:CompileBindings="False"
+        Title="麦芽 Meya · 模型管理"
+        Width="620" Height="430" CanResize="False"
+        WindowStartupLocation="CenterScreen">
+  <Grid Margin="28" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,*,Auto" RowSpacing="10">
+    <TextBlock Grid.Row="0" Text="可插拔语音识别模型" FontSize="24" FontWeight="SemiBold" />
+    <TextBlock Grid.Row="1" Text="实时识别模型" FontWeight="SemiBold" />
+    <ComboBox Grid.Row="2" ItemsSource="{Binding Models}" SelectedItem="{Binding PreviewModel}" />
+    <TextBlock Grid.Row="3" TextWrapping="Wrap" Foreground="#BFC9D4"
+               Text="长按右 Ctrl 说话时用于快速显示文字，建议选择速度快、体积较小的模型。" />
+    <StackPanel Grid.Row="4" Spacing="8">
+      <TextBlock Text="最终识别模型" FontWeight="SemiBold" />
+      <ComboBox ItemsSource="{Binding Models}" SelectedItem="{Binding FinalModel}" />
+      <TextBlock TextWrapping="Wrap" Foreground="#BFC9D4"
+                 Text="松开右 Ctrl 后重新整理并生成最终文字。SeACo 会将个人词库用于热词解码，并自动用本机 CT-Punc-C 补全标点。" />
+    </StackPanel>
+    <TextBlock Grid.Row="5" x:Name="RunningRoles" Foreground="#8FE6D3" TextWrapping="Wrap" />
+    <TextBlock Grid.Row="6" x:Name="StatusText" Foreground="#BFC9D4" VerticalAlignment="Bottom" />
+    <Grid Grid.Row="7" ColumnDefinitions="Auto,Auto,*,Auto" ColumnSpacing="8">
+      <Button Grid.Column="0" Content="添加本地模型目录…" Click="ChooseLocalModel" />
+      <Button Grid.Column="1" Content="恢复推荐配置" Click="RestoreDefaults" />
+      <Button Grid.Column="3" Content="应用两个模型" Classes="accent" Click="ApplyModels" />
+    </Grid>
+  </Grid>
+</Window>

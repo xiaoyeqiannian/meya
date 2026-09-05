@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <Prefer32Bit>false</Prefer32Bit>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Meya.Windows</AssemblyName>
+    <RootNamespace>Meya.Windows</RootNamespace>
+    <Version>0.2.0</Version>
+    <Authors>Meya contributors</Authors>
+    <Description>Meya offline voice input host for Windows.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.13" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.13" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <ProjectReference Include="..\..\src\dotnet\Meya.Core\Meya.Core.csproj" />
+    <ProjectReference Include="..\..\src\dotnet\Meya.UI\Meya.UI.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="..\..\app\MeyaLogo.png" Link="Assets\MeyaLogo.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="MeyaFrameProtocol.cs" />
+    <Compile Remove="SessionStateMachine.cs" />
+  </ItemGroup>
+</Project>
