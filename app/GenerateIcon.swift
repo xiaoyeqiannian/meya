@@ -176,7 +176,7 @@ func drawRabbitAsset() -> Bool {
         return false
     }
 
-    let inset = pixelSize * 0.035
+    let inset = pixelSize * 0.055
     let destination = NSRect(
         x: inset,
         y: inset,
@@ -194,6 +194,14 @@ func drawRabbitAsset() -> Bool {
     return true
 }
 
+func drawAppBackground() {
+    let background = roundedRect(28, 28, 968, 968, 224)
+    NSGradient(colors: [
+        NSColor(calibratedRed: 0.12, green: 0.09, blue: 0.25, alpha: 1),
+        NSColor(calibratedRed: 0.035, green: 0.16, blue: 0.24, alpha: 1),
+    ])!.draw(in: background, angle: -70)
+}
+
 func drawIcon() {
     NSGraphicsContext.current?.imageInterpolation = .high
     NSGraphicsContext.current?.shouldAntialias = true
@@ -204,12 +212,8 @@ func drawIcon() {
         return
     }
 
+    drawAppBackground()
     if !drawRabbitAsset() {
-        let background = roundedRect(28, 28, 968, 968, 224)
-        NSGradient(colors: [
-            NSColor(calibratedRed: 0.035, green: 0.075, blue: 0.20, alpha: 1),
-            NSColor(calibratedRed: 0.015, green: 0.025, blue: 0.075, alpha: 1),
-        ])!.draw(in: background, angle: -90)
         drawMarkApp()
     }
 }
