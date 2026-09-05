@@ -1,0 +1,18 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Meya.UI.Views.LearnCorrectionWindow"
+        Title="麦芽 Meya · 学习刚才的修改"
+        Width="620" Height="470" CanResize="False" WindowStartupLocation="CenterScreen">
+  <Grid Margin="24" RowDefinitions="Auto,Auto,*,Auto,*,Auto,Auto" RowSpacing="8">
+    <TextBlock Grid.Row="0" Text="对照学习上一句" FontSize="24" FontWeight="SemiBold" />
+    <TextBlock Grid.Row="1" Text="识别原文（只读）" FontWeight="SemiBold" />
+    <TextBox Grid.Row="2" x:Name="OriginalText" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" />
+    <TextBlock Grid.Row="3" Text="正确文本（请修改）" FontWeight="SemiBold" />
+    <TextBox Grid.Row="4" x:Name="CorrectedText" AcceptsReturn="True" TextWrapping="Wrap" />
+    <TextBlock Grid.Row="5" x:Name="StatusText" Foreground="#BFC9D4" />
+    <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Content="取消" Click="Cancel" />
+      <Button Content="学习" Classes="accent" Click="Submit" />
+    </StackPanel>
+  </Grid>
+</Window>

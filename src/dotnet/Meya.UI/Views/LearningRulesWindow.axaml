@@ -1,0 +1,26 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Meya.UI.Views.LearningRulesWindow"
+        x:CompileBindings="False"
+        Title="麦芽 Meya · 自动学习规则"
+        Width="900" Height="520" WindowStartupLocation="CenterScreen">
+  <Grid Margin="24" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="10">
+    <TextBlock Grid.Row="0" Text="自动学习规则" FontSize="24" FontWeight="SemiBold" />
+    <TextBlock Grid.Row="1" Text="每条规则显示触发证据、确认次数和实际命中次数；撤销只移除该条自动学习映射。" Foreground="#BFC9D4" />
+    <DataGrid Grid.Row="2" ItemsSource="{Binding Rules}" SelectedItem="{Binding SelectedRule}"
+              AutoGenerateColumns="False" IsReadOnly="True" GridLinesVisibility="All">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="识别形式" Width="2*" Binding="{Binding Observed}" />
+        <DataGridTextColumn Header="标准写法" Width="2*" Binding="{Binding Canonical}" />
+        <DataGridTextColumn Header="状态" Width="*" Binding="{Binding State}" />
+        <DataGridTextColumn Header="确认" Width="*" Binding="{Binding Confirmations}" />
+        <DataGridTextColumn Header="命中" Width="*" Binding="{Binding HitCount}" />
+        <DataGridTextColumn Header="触发证据" Width="2*" Binding="{Binding Evidence}" />
+      </DataGrid.Columns>
+    </DataGrid>
+    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+      <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="#BFC9D4" />
+      <Button Grid.Column="1" Content="撤销选中规则" Click="Rollback" />
+    </Grid>
+  </Grid>
+</Window>

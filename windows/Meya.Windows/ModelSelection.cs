@@ -26,6 +26,20 @@ internal sealed record ModelSelection(string Preview, string Final)
         }
     }
 
+    internal void Save(string userDataDirectory)
+    {
+        Directory.CreateDirectory(userDataDirectory);
+        string path = Path.Combine(userDataDirectory, "model-config.json");
+        string temporary = path + ".tmp";
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, string>
+        {
+            ["preview_model"] = Preview,
+            ["final_model"] = Final,
+        }, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllBytes(temporary, payload);
+        File.Move(temporary, path, overwrite: true);
+    }
+
     private static string? Get(JsonElement root, string name)
     {
         if (!root.TryGetProperty(name, out JsonElement value) || value.ValueKind != JsonValueKind.String)

@@ -1,0 +1,16 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Meya.UI.Views.DiagnosticsWindow"
+        Title="麦芽 Meya · 权限与诊断"
+        Width="680" Height="460" CanResize="False" WindowStartupLocation="CenterScreen">
+  <Grid Margin="28" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="12">
+    <TextBlock Grid.Row="0" Text="权限与诊断" FontSize="24" FontWeight="SemiBold" />
+    <TextBlock Grid.Row="1" Text="Windows 版需要麦克风访问、右 Ctrl 全局监听以及本地识别 worker 正常运行。" TextWrapping="Wrap" Foreground="#BFC9D4" />
+    <TextBox Grid.Row="2" x:Name="ReportText" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" />
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Content="打开麦克风隐私设置" Click="OpenPrivacy" />
+      <Button Content="打开诊断日志" Click="OpenLog" />
+      <Button Content="打开录音目录" Click="OpenRecordings" />
+    </StackPanel>
+  </Grid>
+</Window>

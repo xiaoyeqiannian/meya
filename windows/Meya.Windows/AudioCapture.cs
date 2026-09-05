@@ -18,6 +18,7 @@ internal sealed class AudioCapture : IAsyncDisposable
     private string? _path;
 
     internal event Action<byte[]>? Pcm16Available;
+    internal event Action<float>? LevelAvailable;
 
     internal void Start(string outputPath)
     {
@@ -146,9 +147,11 @@ internal sealed class AudioCapture : IAsyncDisposable
     private void OnDataAvailable(object? sender, WaveInEventArgs args)
     {
         IReadOnlyList<byte[]> chunks;
+        float level;
         lock (_sync)
         {
             chunks = _streamConverter?.Append(args.Buffer.AsSpan(0, args.BytesRecorded)) ?? [];
+            level = _streamConverter?.CurrentLevel ?? 0.03f;
             foreach (byte[] chunk in chunks)
             {
                 _writer?.Write(chunk, 0, chunk.Length);
@@ -156,6 +159,7 @@ internal sealed class AudioCapture : IAsyncDisposable
             }
             _writer?.Flush();
         }
+        LevelAvailable?.Invoke(level);
         Action<byte[]>? callback = Pcm16Available;
         if (callback is not null)
         {

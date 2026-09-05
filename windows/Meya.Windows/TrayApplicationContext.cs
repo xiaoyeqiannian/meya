@@ -1,23 +1,33 @@
 using System.Diagnostics;
+using System.Reflection;
+using System.Text.Json;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Platform;
+using Avalonia.Threading;
 
 namespace Meya.Windows;
 
-internal sealed class TrayApplicationContext : ApplicationContext
+internal sealed class TrayApplicationContext
 {
     private static readonly TimeSpan HoldThreshold = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan RecognitionTimeout = TimeSpan.FromSeconds(60);
 
     private readonly SynchronizationContext _ui;
+    private readonly IClassicDesktopStyleApplicationLifetime _desktop;
     private readonly string _projectRoot;
     private readonly string _userDataDirectory;
     private readonly string _runtimeDirectory;
     private readonly string _recordingsDirectory;
-    private readonly ModelSelection _models;
-    private readonly NotifyIcon _notifyIcon;
+    private ModelSelection _models;
+    private readonly TrayIcon _notifyIcon;
+    private readonly NativeMenuItem _statusItem;
+    private readonly NativeMenuItem _learnItem;
     private readonly OverlayForm _overlay = new();
     private readonly GlobalRightControl _trigger;
-    private readonly System.Windows.Forms.Timer _holdTimer;
+    private readonly DispatcherTimer _holdTimer;
 
     private AsrWorker? _worker;
     private AsrWorker? _previewWorker;
@@ -31,10 +41,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _exiting;
     private bool _restarting;
     private bool _previewRestarting;
+    private KeywordLibraryWindow? _keywordLibraryWindow;
+    private ModelManagerWindow? _modelManagerWindow;
+    private LearnCorrectionWindow? _learnCorrectionWindow;
+    private LearningRulesWindow? _learningRulesWindow;
+    private TrainingDataWindow? _trainingDataWindow;
+    private DiagnosticsWindow? _diagnosticsWindow;
+    private LastRecognition? _lastRecognition;
 
-    internal TrayApplicationContext()
+    internal TrayApplicationContext(IClassicDesktopStyleApplicationLifetime desktop)
     {
-        _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        _desktop = desktop;
+        _ui = SynchronizationContext.Current
+            ?? throw new InvalidOperationException("Avalonia UI synchronization context is unavailable");
         _projectRoot = ProjectLocator.Locate();
         _userDataDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Meya");
@@ -44,25 +63,28 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RuntimeLog.Configure(_runtimeDirectory);
         _models = ModelSelection.Load(_projectRoot, _userDataDirectory);
 
-        ContextMenuStrip menu = new();
-        ToolStripMenuItem status = new("麦芽 Meya · Windows IPC v2 Streaming") { Enabled = false };
-        ToolStripMenuItem openLog = new("打开诊断日志");
-        openLog.Click += (_, _) => OpenLog();
-        ToolStripMenuItem exit = new("退出");
-        exit.Click += async (_, _) => await ShutdownAsync();
-        menu.Items.Add(status);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(openLog);
-        menu.Items.Add(exit);
+        string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.1.0";
+        IReadOnlyList<MenuEntry> model = MeyaMenu.Create(
+            version,
+            "○ 麦芽正在加载识别模型…",
+            canLearnLastCorrection: false);
+        Dictionary<string, NativeMenuItem> items = [];
+        NativeMenu menu = BuildMenu(model, items);
+        _statusItem = items["status"];
+        _learnItem = items["learn-last-correction"];
 
-        _notifyIcon = new NotifyIcon
+        using Stream iconStream = AssetLoader.Open(new Uri("avares://Meya.Windows/Assets/MeyaLogo.png"));
+        _notifyIcon = new TrayIcon
         {
-            Icon = SystemIcons.Information,
-            Text = "麦芽 Meya 正在加载识别模型",
-            ContextMenuStrip = menu,
-            Visible = true,
+            Icon = new WindowIcon(iconStream),
+            ToolTipText = "麦芽 Meya 正在加载识别模型",
+            Menu = menu,
+            IsVisible = true,
         };
-        _holdTimer = new System.Windows.Forms.Timer { Interval = (int)HoldThreshold.TotalMilliseconds };
+        _notifyIcon.Clicked += (_, _) => _overlay.ShowState(StatusText());
+        TrayIcon.SetIcons(Application.Current!, new TrayIcons { _notifyIcon });
+
+        _holdTimer = new DispatcherTimer { Interval = HoldThreshold };
         _holdTimer.Tick += OnHoldElapsed;
 
         _trigger = new GlobalRightControl();
@@ -70,8 +92,59 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _trigger.Released += (_, _) => _ui.Post(async _ => await OnTriggerReleasedAsync(), null);
         _trigger.Cancelled += (_, _) => _ui.Post(async _ => await OnTriggerCancelledAsync(), null);
 
-        RuntimeLog.Write($"Windows host started root={_projectRoot}");
+        RuntimeLog.Write($"Windows Avalonia host started root={_projectRoot}");
         _ = StartWorkersAsync();
+    }
+
+    private NativeMenu BuildMenu(IEnumerable<MenuEntry> entries, IDictionary<string, NativeMenuItem> items)
+    {
+        NativeMenu menu = new();
+        foreach (MenuEntry entry in entries)
+        {
+            if (entry.Kind == MenuEntryKind.Separator)
+            {
+                menu.Items.Add(new NativeMenuItemSeparator());
+                continue;
+            }
+
+            NativeMenuItem item = new(entry.Label) { IsEnabled = entry.Enabled };
+            items[entry.Key] = item;
+            if (entry.Children is { Count: > 0 })
+            {
+                item.Menu = BuildMenu(entry.Children, items);
+            }
+            else if (entry.Kind == MenuEntryKind.Command)
+            {
+                item.Click += async (_, _) => await ExecuteMenuCommandAsync(entry.Key);
+            }
+            menu.Items.Add(item);
+        }
+        return menu;
+    }
+
+    private async Task ExecuteMenuCommandAsync(string key)
+    {
+        switch (key)
+        {
+            case "learn-last-correction":
+                await LearnLastCorrectionAsync();
+                break;
+            case "personal-glossary":
+                ShowKeywordLibrary();
+                break;
+            case "model-manager":
+                ShowModelManager();
+                break;
+            case "open-recordings":
+                OpenDirectory(_recordingsDirectory);
+                break;
+            case "permissions-diagnostics":
+                ShowDiagnostics();
+                break;
+            case "exit":
+                await ShutdownAsync();
+                break;
+        }
     }
 
     private async Task StartWorkersAsync()
@@ -158,14 +231,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void UpdateReadyStatus()
     {
+        string text = StatusText();
+        _statusItem.Header = text;
+        _notifyIcon.ToolTipText = text;
+    }
+
+    private string StatusText()
+    {
         if (_worker is not { IsReady: true })
         {
-            _notifyIcon.Text = "麦芽 Meya 正在加载最终模型";
-            return;
+            return "○ 麦芽正在加载识别模型…";
         }
-        _notifyIcon.Text = _previewWorker is { IsReady: true, SupportsNativeStreaming: true }
-            ? "麦芽 Meya · 实时草稿已就绪"
-            : "麦芽 Meya · 最终定稿已就绪";
+        return _previewWorker is { IsReady: true, SupportsNativeStreaming: true }
+            ? "● 麦芽已就绪 · 长按右 Ctrl 输入"
+            : "◐ 最终定稿已就绪 · 实时草稿不可用";
     }
 
     private void OnTriggerPressed()
@@ -228,6 +307,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 _recordingsDirectory,
                 $"{DateTime.Now:yyyyMMdd-HHmmss-fff}-{_session:N}.wav");
             AudioCapture audio = new();
+            audio.LevelAvailable += OnAudioLevelAvailable;
             if (preview is not null)
             {
                 audio.Pcm16Available += OnPcm16Available;
@@ -245,6 +325,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
             await CancelSessionAsync();
         }
     }
+
+    private void OnAudioLevelAvailable(float level) =>
+        _overlay.UpdateAudioLevel(level);
 
     private void OnPcm16Available(byte[] pcm16)
     {
@@ -323,6 +406,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             AudioCapture audio = _audio ?? throw new InvalidOperationException("录音会话已丢失");
             _audio = null;
+            audio.LevelAvailable -= OnAudioLevelAvailable;
             audio.Pcm16Available -= OnPcm16Available;
             captured = await audio.StopAsync().ConfigureAwait(true);
             await audio.DisposeAsync();
@@ -353,6 +437,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 _overlay.HideState();
                 return;
             }
+
+            _lastRecognition = new LastRecognition(
+                result.Text,
+                result.RawText,
+                captured.Path,
+                result.Model);
+            _learnItem.Header = "学习刚才的修改";
+            _learnItem.IsEnabled = true;
 
             bool inserted = CommitFinalText(result.Text, "识别结果");
             _overlay.ShowFinal(result.Text, inserted);
@@ -450,6 +542,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _audio = null;
         if (audio is not null)
         {
+            audio.LevelAvailable -= OnAudioLevelAvailable;
             audio.Pcm16Available -= OnPcm16Available;
             try
             {
@@ -558,7 +651,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 old.Fatal -= OnWorkerFatal;
                 await old.DisposeAsync();
             }
-            _notifyIcon.Text = "麦芽 Meya 正在重启最终模型";
+            _statusItem.Header = "○ 正在重启最终识别模型…";
+            _notifyIcon.ToolTipText = "麦芽 Meya 正在重启最终模型";
             _overlay.ShowState("正在重启最终识别模型…");
             await StartFinalWorkerAsync();
         }
@@ -596,10 +690,288 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private void ShowError(string title, string message)
     {
         RuntimeLog.Write($"ERROR {title}: {message}");
-        _notifyIcon.BalloonTipTitle = title;
-        _notifyIcon.BalloonTipText = message;
-        _notifyIcon.BalloonTipIcon = ToolTipIcon.Error;
-        _notifyIcon.ShowBalloonTip(5000);
+        _overlay.ShowState($"{title} · {message}");
+    }
+
+    private Task LearnLastCorrectionAsync()
+    {
+        if (_lastRecognition is null)
+        {
+            _overlay.ShowState("暂无可学习的修改 · 先完成一次语音输入");
+            return Task.CompletedTask;
+        }
+        if (_learnCorrectionWindow is null)
+        {
+            LearnCorrectionWindow window = new();
+            window.Configure(_lastRecognition.FinalText, SubmitFeedbackAsync);
+            window.Closed += (_, _) => _learnCorrectionWindow = null;
+            _learnCorrectionWindow = window;
+            window.Show();
+        }
+        else
+        {
+            _learnCorrectionWindow.Activate();
+        }
+        return Task.CompletedTask;
+    }
+
+    private async Task SubmitFeedbackAsync(string original, string corrected)
+    {
+        LastRecognition recognition = _lastRecognition
+            ?? throw new InvalidOperationException("上一条识别记录已经失效");
+        AsrWorker worker = _worker ?? throw new InvalidOperationException("学习服务尚未就绪");
+        JsonElement response = await worker.SendRequestAsync(
+            new Dictionary<string, object?>
+            {
+                ["command"] = "feedback",
+                ["expected_text"] = original,
+                ["edited_text"] = corrected,
+                ["raw_text"] = recognition.RawText,
+                ["final_text"] = recognition.FinalText,
+                ["audio_path"] = recognition.AudioPath,
+                ["app_name"] = "Windows",
+                ["explicit"] = true,
+                ["recognition_model"] = recognition.Model,
+            },
+            Guid.NewGuid(),
+            TimeSpan.FromSeconds(10));
+        ThrowIfResponseError(response);
+        string mapping = FirstLearnedMapping(response) ?? "已保存本地学习记录";
+        _overlay.ShowState(mapping);
+        _lastRecognition = null;
+        _learnItem.Header = "暂无可学习的修改";
+        _learnItem.IsEnabled = false;
+        await RestartWorkerAsync();
+    }
+
+    private void ShowKeywordLibrary()
+    {
+        if (_keywordLibraryWindow is null)
+        {
+            KeywordLibraryWindow window = new();
+            window.Configure(
+                new GlossaryStore(_userDataDirectory, _projectRoot),
+                RestartWorkerAsync,
+                ShowLearningRules,
+                ShowTrainingData);
+            window.Closed += (_, _) => _keywordLibraryWindow = null;
+            _keywordLibraryWindow = window;
+            window.Show();
+        }
+        else
+        {
+            _keywordLibraryWindow.Activate();
+        }
+    }
+
+    private void ShowLearningRules() => _ = ShowLearningRulesAsync();
+
+    private async Task ShowLearningRulesAsync()
+    {
+        try
+        {
+            AsrWorker worker = _worker ?? throw new InvalidOperationException("学习服务尚未就绪");
+            JsonElement response = await worker.SendRequestAsync(
+                new Dictionary<string, object?> { ["command"] = "list_learning_rules" },
+                Guid.NewGuid(),
+                TimeSpan.FromSeconds(10));
+            ThrowIfResponseError(response);
+            List<LearningRuleItem> rules = [];
+            if (response.TryGetProperty("rules", out JsonElement values) && values.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement value in values.EnumerateArray())
+                {
+                    rules.Add(new LearningRuleItem
+                    {
+                        Id = JsonInt(value, "id"),
+                        Observed = JsonString(value, "observed"),
+                        Canonical = JsonString(value, "canonical"),
+                        Confirmations = JsonInt(value, "confirmations"),
+                        HitCount = JsonInt(value, "hit_count"),
+                        Activated = JsonBool(value, "activated"),
+                        Evidence = JsonString(value, "evidence"),
+                        UpdatedAt = JsonString(value, "updated_at"),
+                    });
+                }
+            }
+            _learningRulesWindow?.Close();
+            LearningRulesWindow window = new();
+            window.Configure(rules, RollbackLearningRuleAsync);
+            window.Closed += (_, _) => _learningRulesWindow = null;
+            _learningRulesWindow = window;
+            window.Show();
+        }
+        catch (Exception exception)
+        {
+            ShowError("读取已学规则失败", exception.Message);
+        }
+    }
+
+    private async Task RollbackLearningRuleAsync(int ruleId)
+    {
+        AsrWorker worker = _worker ?? throw new InvalidOperationException("学习服务尚未就绪");
+        JsonElement response = await worker.SendRequestAsync(
+            new Dictionary<string, object?>
+            {
+                ["command"] = "rollback_learning_rule",
+                ["rule_id"] = ruleId,
+            },
+            Guid.NewGuid(),
+            TimeSpan.FromSeconds(10));
+        ThrowIfResponseError(response);
+        await RestartWorkerAsync();
+    }
+
+    private void ShowTrainingData()
+    {
+        if (_trainingDataWindow is null)
+        {
+            string path = Path.Combine(_userDataDirectory, "training-data");
+            TrainingDataWindow window = new();
+            window.Configure(new TrainingDataStore(_userDataDirectory), () => OpenDirectory(path));
+            window.Closed += (_, _) => _trainingDataWindow = null;
+            _trainingDataWindow = window;
+            window.Show();
+        }
+        else
+        {
+            _trainingDataWindow.Activate();
+        }
+    }
+
+    private void ShowModelManager()
+    {
+        if (_modelManagerWindow is null)
+        {
+            ModelManagerWindow window = new();
+            window.Configure(
+                DiscoverModels(),
+                _models.Preview,
+                _models.Final,
+                ModelSelection.DefaultPreview,
+                ModelSelection.DefaultFinal,
+                ApplyModelsAsync);
+            window.Closed += (_, _) => _modelManagerWindow = null;
+            _modelManagerWindow = window;
+            window.Show();
+        }
+        else
+        {
+            _modelManagerWindow.Activate();
+        }
+    }
+
+    private IEnumerable<string> DiscoverModels()
+    {
+        HashSet<string> models = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ModelSelection.DefaultPreview,
+            ModelSelection.DefaultFinal,
+            _models.Preview,
+            _models.Final,
+        };
+        string root = Path.Combine(_projectRoot, "models");
+        if (Directory.Exists(root))
+        {
+            foreach (string modelFile in Directory.EnumerateFiles(root, "model.pt", SearchOption.AllDirectories))
+            {
+                string? directory = Path.GetDirectoryName(modelFile);
+                if (directory is not null && File.Exists(Path.Combine(directory, "config.yaml")))
+                {
+                    models.Add("paraformer:" + directory);
+                }
+            }
+        }
+        return models.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private async Task ApplyModelsAsync(string preview, string final)
+    {
+        _models = new ModelSelection(preview.Trim(), final.Trim());
+        _models.Save(_userDataDirectory);
+        await Task.WhenAll(RestartWorkerAsync(), RestartPreviewWorkerAsync());
+    }
+
+    private void ShowDiagnostics()
+    {
+        string report = string.Join(Environment.NewLine,
+        [
+            $"版本：{Assembly.GetExecutingAssembly().GetName().Version}",
+            $"右 Ctrl 全局监听：{(_exiting ? "已停止" : "已安装")}",
+            $"实时识别 worker：{(_previewWorker is { IsReady: true } ? "已就绪" : "不可用")}",
+            $"最终识别 worker：{(_worker is { IsReady: true } ? "已就绪" : "不可用")}",
+            $"实时流式识别：{(_previewWorker is { SupportsNativeStreaming: true } ? "支持" : "不可用")}",
+            $"用户数据：{_userDataDirectory}",
+            $"录音目录：{_recordingsDirectory}",
+            $"诊断日志：{RuntimeLog.Path ?? "尚未创建"}",
+        ]);
+        if (_diagnosticsWindow is null)
+        {
+            DiagnosticsWindow window = new();
+            window.Configure(
+                report,
+                () => Process.Start(new ProcessStartInfo("ms-settings:privacy-microphone") { UseShellExecute = true }),
+                OpenLog,
+                () => OpenDirectory(_recordingsDirectory));
+            window.Closed += (_, _) => _diagnosticsWindow = null;
+            _diagnosticsWindow = window;
+            window.Show();
+        }
+        else
+        {
+            _diagnosticsWindow.Configure(
+                report,
+                () => Process.Start(new ProcessStartInfo("ms-settings:privacy-microphone") { UseShellExecute = true }),
+                OpenLog,
+                () => OpenDirectory(_recordingsDirectory));
+            _diagnosticsWindow.Activate();
+        }
+    }
+
+    private static void ThrowIfResponseError(JsonElement response)
+    {
+        if (response.TryGetProperty("error", out JsonElement error) && error.ValueKind == JsonValueKind.String)
+        {
+            throw new InvalidOperationException(error.GetString());
+        }
+    }
+
+    private static string? FirstLearnedMapping(JsonElement response)
+    {
+        foreach (string property in new[] { "activated", "observed" })
+        {
+            if (!response.TryGetProperty(property, out JsonElement values) || values.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+            foreach (JsonElement value in values.EnumerateArray())
+            {
+                string observed = JsonString(value, "observed");
+                string canonical = JsonString(value, "canonical");
+                if (observed.Length > 0 && canonical.Length > 0)
+                {
+                    return $"已学习：{observed} → {canonical}";
+                }
+            }
+        }
+        return null;
+    }
+
+    private static string JsonString(JsonElement value, string name) =>
+        value.TryGetProperty(name, out JsonElement property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString() ?? string.Empty
+            : string.Empty;
+
+    private static int JsonInt(JsonElement value, string name) =>
+        value.TryGetProperty(name, out JsonElement property) && property.TryGetInt32(out int result) ? result : 0;
+
+    private static bool JsonBool(JsonElement value, string name) =>
+        value.TryGetProperty(name, out JsonElement property) && property.ValueKind == JsonValueKind.True;
+
+    private static void OpenDirectory(string path)
+    {
+        Directory.CreateDirectory(path);
+        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
     }
 
     private void OpenLog()
@@ -616,7 +988,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         Process.Start(new ProcessStartInfo("notepad.exe", $"\"{path}\"") { UseShellExecute = true });
     }
 
-    private async Task ShutdownAsync()
+    private sealed record LastRecognition(
+        string FinalText,
+        string RawText,
+        string AudioPath,
+        string Model);
+
+    internal async Task ShutdownAsync(bool shutdownApplication = true)
     {
         if (_exiting)
         {
@@ -641,10 +1019,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
             worker.Fatal -= OnWorkerFatal;
             await worker.DisposeAsync();
         }
-        _notifyIcon.Visible = false;
+        _notifyIcon.IsVisible = false;
         _notifyIcon.Dispose();
         _overlay.Dispose();
-        _holdTimer.Dispose();
-        ExitThread();
+        if (shutdownApplication)
+        {
+            _desktop.Shutdown();
+        }
     }
 }

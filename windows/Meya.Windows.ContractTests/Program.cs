@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
+using Meya.Core;
 using Meya.Windows;
 using NAudio.Wave;
 
@@ -113,6 +114,17 @@ static void VerifyStreamingPcmConversion()
         {
             throw new InvalidOperationException($"PCM16 conversion amplitude: expected 8192, got {sample}");
         }
+    }
+    if (converter.CurrentLevel < 0.9f)
+    {
+        throw new InvalidOperationException($"PCM meter level: expected loud input, got {converter.CurrentLevel:F3}");
+    }
+
+    StreamingPcm16Converter silentConverter = new(format);
+    silentConverter.Append(new byte[format.BlockAlign * 128]);
+    if (silentConverter.CurrentLevel > 0.01f)
+    {
+        throw new InvalidOperationException($"PCM meter silence: expected near zero, got {silentConverter.CurrentLevel:F3}");
     }
 }
 
