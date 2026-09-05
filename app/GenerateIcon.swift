@@ -2,13 +2,14 @@ import AppKit
 import Foundation
 
 guard CommandLine.arguments.count >= 2 else {
-    fputs("usage: generate-icon <output.{png|tiff|pdf}> [size] [app|template]\n", stderr)
+    fputs("usage: generate-icon <output.{png|tiff|pdf}> [size] [app|template] [asset.png]\n", stderr)
     exit(2)
 }
 
 let outputURL = URL(fileURLWithPath: CommandLine.arguments[1])
 let pixelSize = CGFloat(CommandLine.arguments.dropFirst(2).first.flatMap(Int.init) ?? 1024)
 let renderingMode = CommandLine.arguments.dropFirst(3).first ?? "app"
+let assetURL = CommandLine.arguments.dropFirst(4).first.map { URL(fileURLWithPath: $0) }
 
 guard pixelSize > 0, renderingMode == "app" || renderingMode == "template" else {
     fputs("size must be positive and mode must be app or template\n", stderr)
@@ -163,6 +164,36 @@ func drawMarkApp() {
     sound.fill()
 }
 
+func drawRabbitAsset() -> Bool {
+    guard let assetURL,
+          let image = NSImage(contentsOf: assetURL),
+          let representation = image.bestRepresentation(
+              for: NSRect(origin: .zero, size: canvas),
+              context: nil,
+              hints: nil
+          )
+    else {
+        return false
+    }
+
+    let inset = pixelSize * 0.035
+    let destination = NSRect(
+        x: inset,
+        y: inset,
+        width: pixelSize - inset * 2,
+        height: pixelSize - inset * 2
+    )
+    representation.draw(
+        in: destination,
+        from: NSRect(origin: .zero, size: representation.size),
+        operation: .sourceOver,
+        fraction: 1,
+        respectFlipped: false,
+        hints: nil
+    )
+    return true
+}
+
 func drawIcon() {
     NSGraphicsContext.current?.imageInterpolation = .high
     NSGraphicsContext.current?.shouldAntialias = true
@@ -173,13 +204,14 @@ func drawIcon() {
         return
     }
 
-    let background = roundedRect(28, 28, 968, 968, 224)
-    NSGradient(colors: [
-        NSColor(calibratedRed: 0.035, green: 0.075, blue: 0.20, alpha: 1),
-        NSColor(calibratedRed: 0.015, green: 0.025, blue: 0.075, alpha: 1),
-    ])!.draw(in: background, angle: -90)
-
-    drawMarkApp()
+    if !drawRabbitAsset() {
+        let background = roundedRect(28, 28, 968, 968, 224)
+        NSGradient(colors: [
+            NSColor(calibratedRed: 0.035, green: 0.075, blue: 0.20, alpha: 1),
+            NSColor(calibratedRed: 0.015, green: 0.025, blue: 0.075, alpha: 1),
+        ])!.draw(in: background, angle: -90)
+        drawMarkApp()
+    }
 }
 
 let data: Data
