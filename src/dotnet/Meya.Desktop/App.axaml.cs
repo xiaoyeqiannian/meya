@@ -13,7 +13,6 @@ public partial class App : Application
 {
     private TrayIcon? _trayIcon;
     private OverlayWindow? _overlay;
-    private bool _showingDraft;
 
     public override void Initialize() => Avalonia.Markup.Xaml.AvaloniaXamlLoader.Load(this);
 
@@ -34,7 +33,7 @@ public partial class App : Application
                 "○ 麦芽正在加载识别模型…",
                 canLearnLastCorrection: false);
             NativeMenu menu = BuildMenu(model, desktop);
-            using Stream iconStream = AssetLoader.Open(new Uri("avares://Meya.Desktop/Assets/MeyaLogo.png"));
+            using Stream iconStream = AssetLoader.Open(new Uri("avares://Meya.Desktop/Assets/MeyaStatus.png"));
             _trayIcon = new TrayIcon
             {
                 Icon = new WindowIcon(iconStream),
@@ -42,7 +41,6 @@ public partial class App : Application
                 Menu = menu,
                 IsVisible = true,
             };
-            _trayIcon.Clicked += (_, _) => ToggleOverlay();
             TrayIcon.SetIcons(this, new TrayIcons { _trayIcon });
 
             bool overlaySmoke = Environment.GetCommandLineArgs().Contains("--overlay-smoke", StringComparer.OrdinalIgnoreCase);
@@ -107,17 +105,5 @@ public partial class App : Application
                 _overlay?.ShowPresentation(OverlayPresentation.Message("共享管理窗口将在下一迁移阶段接入"));
                 break;
         }
-    }
-
-    private void ToggleOverlay()
-    {
-        if (_overlay is null)
-        {
-            return;
-        }
-        _showingDraft = !_showingDraft;
-        _overlay.ShowPresentation(_showingDraft
-            ? OverlayPresentation.Draft("Avalonia 共享浮层已运行，macOS 与 Windows 使用同一套布局和状态模型。", "右 Ctrl")
-            : OverlayPresentation.Hidden());
     }
 }
