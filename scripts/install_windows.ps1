@@ -46,7 +46,18 @@ $link.WorkingDirectory = $install
 $link.Description = 'Meya offline voice input for Windows'
 $link.Save()
 
+$executable = Join-Path $install 'Meya.Windows.exe'
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+New-Item -Path $runKey -Force | Out-Null
+New-ItemProperty `
+    -Path $runKey `
+    -Name 'Meya' `
+    -PropertyType String `
+    -Value ('"' + $executable + '"') `
+    -Force | Out-Null
+
 if (-not $NoLaunch) {
-    Start-Process (Join-Path $install 'Meya.Windows.exe')
+    Start-Process $executable
 }
 Write-Host "Meya installed to: $install"
+Write-Host "Meya startup registered for current user: $executable"
