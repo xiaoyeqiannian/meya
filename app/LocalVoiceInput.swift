@@ -2811,6 +2811,8 @@ private final class ASRService {
 }
 
 private enum TextInserter {
+    private static let unicodeEventChunkLength = 20
+
     private struct PasteboardSnapshot {
         let items: [[NSPasteboard.PasteboardType: Data]]
     }
@@ -2821,6 +2823,15 @@ private enum TextInserter {
             return false
         }
         if insertUsingAccessibility(text) {
+            return true
+        }
+
+        // Codex is an Electron editor whose AXSelectedText setter can be
+        // exposed but reject writes while the composer is re-rendering. Its
+        // focused editor still accepts trusted Unicode keyboard events, so
+        // use that targeted fallback before the clipboard path.
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
+           postUnicode(text) {
             return true
         }
 
@@ -2843,6 +2854,39 @@ private enum TextInserter {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             guard pasteboard.changeCount == insertedChangeCount else { return }
             restorePasteboard(snapshot, to: pasteboard)
+        }
+        return true
+    }
+
+    private static func postUnicode(_ text: String) -> Bool {
+        guard !text.isEmpty,
+              let source = CGEventSource(stateID: .combinedSessionState)
+        else { return false }
+
+        let units = Array(text.utf16)
+        var offset = 0
+        while offset < units.count {
+            var end = min(units.count, offset + Self.unicodeEventChunkLength)
+            if end < units.count,
+               units[end - 1] >= 0xD800,
+               units[end - 1] <= 0xDBFF {
+                end -= 1
+            }
+            guard end > offset,
+                  let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                  let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+            else { return false }
+            let chunk = Array(units[offset..<end])
+            chunk.withUnsafeBufferPointer { buffer in
+                guard let baseAddress = buffer.baseAddress else { return }
+                keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+                keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+            }
+            markAsMeyaInjected(keyDown)
+            markAsMeyaInjected(keyUp)
+            keyDown.post(tap: .cghidEventTap)
+            keyUp.post(tap: .cghidEventTap)
+            offset = end
         }
         return true
     }
@@ -3211,15 +3255,24 @@ private final class LiveDraftInserter {
         // failures and accidental overwrites after a pointer click.
         guard let target = refreshLiveTarget(),
               ownsCurrentDraft(target),
-              setSelectedRange(ownedRange, on: target),
-              AXUIElementSetAttributeValue(
-                target,
-                kAXSelectedTextAttribute as CFString,
-                replacement as CFString
-              ) == .success
+              setSelectedRange(ownedRange, on: target)
         else {
             reset()
             return false
+        }
+
+        let axWrite = AXUIElementSetAttributeValue(
+            target,
+            kAXSelectedTextAttribute as CFString,
+            replacement as CFString
+        ) == .success
+        guard axWrite else {
+            // The target was validated immediately before this write. If the
+            // Electron node rejects AXSelectedText during a render, fall back
+            // to the same checked range through Unicode events. The fallback
+            // itself revalidates focus/caret before posting anything.
+            usesAccessibilityRange = false
+            return replaceUsingKeyboard(with: replacement, finish: finish)
         }
         ownedRange.length = replacement.utf16.count
         lastDraft = replacement
