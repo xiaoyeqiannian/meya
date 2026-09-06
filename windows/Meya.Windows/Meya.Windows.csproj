@@ -21,7 +21,7 @@
     <ProjectReference Include="..\..\src\dotnet\Meya.UI\Meya.UI.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <AvaloniaResource Include="..\..\app\MeyaLogo.png" Link="Assets\MeyaLogo.png" />
+    <AvaloniaResource Include="..\..\app\MeyaStatus.png" Link="Assets\MeyaStatus.png" />
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="MeyaFrameProtocol.cs" />
