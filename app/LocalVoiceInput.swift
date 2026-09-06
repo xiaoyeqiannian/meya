@@ -3204,7 +3204,13 @@ private final class LiveDraftInserter {
         if !usesAccessibilityRange {
             return replaceUsingKeyboard(with: replacement, finish: finish)
         }
-        guard let target, targetStillFocused(target), ownsCurrentDraft(target),
+        // Electron/Web editors (including Codex) can replace the focused AX
+        // node after every AXSelectedText write. Refresh the node before each
+        // live update, but only accept it when the caret/text still proves
+        // that Meya owns the previous draft. This avoids both stale-node
+        // failures and accidental overwrites after a pointer click.
+        guard let target = refreshLiveTarget(),
+              ownsCurrentDraft(target),
               setSelectedRange(ownedRange, on: target),
               AXUIElementSetAttributeValue(
                 target,
@@ -3223,6 +3229,52 @@ private final class LiveDraftInserter {
             reset()
         }
         return true
+    }
+
+    private func refreshLiveTarget() -> AXUIElement? {
+        guard frontmostApplicationIsUnchanged(),
+              let focused = focusedElement(),
+              !isSecureField(focused)
+        else {
+            writeDiagnostic(state: "unicode_fallback_lost_focus")
+            return nil
+        }
+
+        if let target, CFEqual(target, focused) {
+            return target
+        }
+
+        // A changed AX node is accepted only when its caret remains exactly at
+        // the end of the draft we inserted, or when its readable value still
+        // contains that draft at the owned UTF-16 range. A real pointer edit
+        // normally changes one of these invariants and is rejected below.
+        if lastDraft.isEmpty {
+            target = focused
+            selectionRangeIsSettable = selectedRangeIsSettable(focused)
+            return focused
+        }
+
+        let expectedCaret = originalRange.location + lastDraft.utf16.count
+        let caretMatches = selectedRange(of: focused).map {
+            $0.length == 0 && $0.location == expectedCaret
+        } ?? false
+        let textMatches: Bool = {
+            guard let value = textValue(of: focused) else { return false }
+            let source = value as NSString
+            let range = NSRange(location: ownedRange.location, length: ownedRange.length)
+            guard range.location >= 0, range.location + range.length <= source.length else {
+                return false
+            }
+            return source.substring(with: range) == lastDraft
+        }()
+        guard caretMatches || textMatches else {
+            writeDiagnostic(state: "unicode_fallback_draft_moved")
+            return nil
+        }
+
+        target = focused
+        selectionRangeIsSettable = selectedRangeIsSettable(focused)
+        return focused
     }
 
     private func replaceUsingKeyboard(
@@ -3336,11 +3388,21 @@ private final class LiveDraftInserter {
         if lastDraft.isEmpty {
             return true
         }
-        guard setSelectedRange(ownedRange, on: element),
-              let selected = selectedText(of: element),
-              selected == lastDraft
-        else { return false }
-        return true
+        guard setSelectedRange(ownedRange, on: element) else { return false }
+        if let selected = selectedText(of: element) {
+            return selected == lastDraft
+        }
+
+        // Some contenteditable AX implementations accept the range but do not
+        // expose AXSelectedText. Verify the same UTF-16 range through AXValue
+        // instead of treating a valid Codex node as a lost draft.
+        guard let value = textValue(of: element) else { return false }
+        let source = value as NSString
+        let range = NSRange(location: ownedRange.location, length: ownedRange.length)
+        guard range.location >= 0, range.location + range.length <= source.length else {
+            return false
+        }
+        return source.substring(with: range) == lastDraft
     }
 
     private func focusedElement() -> AXUIElement? {

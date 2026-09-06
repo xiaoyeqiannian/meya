@@ -16,6 +16,9 @@ def main() -> int:
     assert "selectionRangeIsSettable = selectedRangeIsSettable(focused)" in swift
     assert "if selectionIsKnown, selectionRangeIsSettable, let target" in swift
     assert "targetStillFocused(target), ownsCurrentDraft(target)" in swift
+    assert "refreshLiveTarget()" in swift
+    assert "unicode_fallback_draft_moved" in swift
+    assert "Some contenteditable AX implementations accept the range" in swift
     assert "setSelectedRange(ownedRange, on: target) && postUnicode(replacement)" in swift
     assert "unicode_fallback_draft_moved" in swift
     assert "maxDirectAccessibilityCommitUTF16 = 160" in swift
