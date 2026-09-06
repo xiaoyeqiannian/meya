@@ -1,0 +1,52 @@
+name: Release Windows package
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload
+        required: true
+        default: v0.2
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build and test Windows host
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
+
+      - name: Assemble release archive
+        shell: pwsh
+        run: |
+          $root = (Get-Location).Path
+          $stage = Join-Path $root 'dist\Meya-v0.2.0-windows-x64'
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'dist') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
+          Copy-Item -Path (Join-Path $root 'dist\Meya.Windows') -Destination (Join-Path $stage 'dist') -Recurse -Force
+          Copy-Item -Path (Join-Path $root 'scripts\bootstrap_windows.ps1'), (Join-Path $root 'scripts\download_paraformer_windows.ps1'), (Join-Path $root 'scripts\install_windows.ps1'), (Join-Path $root 'scripts\uninstall_windows.ps1') -Destination (Join-Path $stage 'scripts') -Force
+          Copy-Item -Path (Join-Path $root 'RELEASE_NOTES_v0.2.0.md'), (Join-Path $root 'README.md') -Destination $stage -Force
+          Compress-Archive -Path $stage -DestinationPath (Join-Path $root 'dist\Meya-v0.2.0-windows-x64.zip') -CompressionLevel Optimal -Force
+          Get-FileHash (Join-Path $root 'dist\Meya-v0.2.0-windows-x64.zip') -Algorithm SHA256 | Format-List
+
+      - name: Upload Windows asset to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: dist/Meya-v0.2.0-windows-x64.zip
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
