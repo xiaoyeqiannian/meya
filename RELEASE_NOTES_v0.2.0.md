@@ -44,4 +44,4 @@
 
 - `Meya-v0.2.0-macos-arm64.pkg`：macOS 安装包。
 - `Meya-v0.2.0-windows-x64.zip`：Windows x64 自包含预览版。
-
+- `SHA256SUMS.txt`：两个平台发行包的 SHA256 校验值。
