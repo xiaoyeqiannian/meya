@@ -73,7 +73,7 @@ internal sealed class TrayApplicationContext
         _statusItem = items["status"];
         _learnItem = items["learn-last-correction"];
 
-        using Stream iconStream = AssetLoader.Open(new Uri("avares://Meya.Windows/Assets/MeyaLogo.png"));
+        using Stream iconStream = AssetLoader.Open(new Uri("avares://Meya.Windows/Assets/MeyaStatus.png"));
         _notifyIcon = new TrayIcon
         {
             Icon = new WindowIcon(iconStream),
@@ -81,7 +81,6 @@ internal sealed class TrayApplicationContext
             Menu = menu,
             IsVisible = true,
         };
-        _notifyIcon.Clicked += (_, _) => _overlay.ShowState(StatusText());
         TrayIcon.SetIcons(Application.Current!, new TrayIcons { _notifyIcon });
 
         _holdTimer = new DispatcherTimer { Interval = HoldThreshold };
