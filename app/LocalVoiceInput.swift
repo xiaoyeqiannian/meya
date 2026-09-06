@@ -3271,6 +3271,11 @@ private final class LiveDraftInserter {
             // Electron node rejects AXSelectedText during a render, fall back
             // to the same checked range through Unicode events. The fallback
             // itself revalidates focus/caret before posting anything.
+            let caret = CFRange(
+                location: ownedRange.location + ownedRange.length,
+                length: 0
+            )
+            _ = setSelectedRange(caret, on: target)
             usesAccessibilityRange = false
             return replaceUsingKeyboard(with: replacement, finish: finish)
         }
