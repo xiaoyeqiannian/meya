@@ -2822,6 +2822,15 @@ private enum TextInserter {
             requestAccessibilityPermission()
             return false
         }
+
+        // Codex can report a successful AXSelectedText write while its
+        // contenteditable composer discards the mutation during a React
+        // render. Prefer the keyboard path for this host so a success code
+        // cannot hide a no-op insertion.
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
+           postUnicode(text) {
+            return true
+        }
         if insertUsingAccessibility(text) {
             return true
         }
@@ -3012,6 +3021,7 @@ private final class LiveDraftInserter {
     private var usesAccessibilityRange = false
     private var selectionIsKnown = false
     private var selectionRangeIsSettable = false
+    private var prefersUnicodeEvents = false
     private var frontmostPID: pid_t?
     private var initialValue: String?
     private var pendingFeedback: PendingFeedbackObservation?
@@ -3029,6 +3039,7 @@ private final class LiveDraftInserter {
             return
         }
         frontmostPID = application.processIdentifier
+        prefersUnicodeEvents = application.bundleIdentifier == "com.openai.codex"
 
         let focused = focusedElement()
         if let focused, isSecureField(focused) {
@@ -3059,9 +3070,15 @@ private final class LiveDraftInserter {
         ownedRange = selection
         selectionIsKnown = true
         selectionRangeIsSettable = selectedRangeIsSettable(focused)
-        usesAccessibilityRange = supportsDraftEditing(focused)
+        usesAccessibilityRange = !prefersUnicodeEvents && supportsDraftEditing(focused)
         isReady = true
-        writeDiagnostic(state: usesAccessibilityRange ? "ready_accessibility_range" : "ready_unicode_fallback")
+        let readyState: String
+        if prefersUnicodeEvents {
+            readyState = "ready_unicode_codex"
+        } else {
+            readyState = usesAccessibilityRange ? "ready_accessibility_range" : "ready_unicode_fallback"
+        }
+        writeDiagnostic(state: readyState)
     }
 
     func update(_ text: String) -> Bool {
@@ -3339,7 +3356,8 @@ private final class LiveDraftInserter {
         with replacement: String,
         finish: Bool
     ) -> Bool {
-        guard frontmostApplicationIsUnchanged() else {
+        guard frontmostApplicationIsUnchanged(),
+              refreshLiveTarget() != nil else {
             writeDiagnostic(state: "unicode_fallback_lost_focus")
             return false
         }
@@ -3380,8 +3398,18 @@ private final class LiveDraftInserter {
             return false
         }
         guard selectionIsKnown, !lastDraft.isEmpty, let element = target else { return true }
-        guard let selection = selectedRange(of: element), selection.length == 0 else { return false }
-        return selection.location == originalRange.location + lastDraft.utf16.count
+        if let selection = selectedRange(of: element) {
+            return selection.length == 0
+                && selection.location == originalRange.location + lastDraft.utf16.count
+        }
+
+        guard let value = textValue(of: element) else { return false }
+        let source = value as NSString
+        let range = NSRange(location: ownedRange.location, length: ownedRange.length)
+        guard range.location >= 0, range.location + range.length <= source.length else {
+            return false
+        }
+        return source.substring(with: range) == lastDraft
     }
 
     private func frontmostApplicationIsUnchanged() -> Bool {
@@ -3668,6 +3696,7 @@ private final class LiveDraftInserter {
         usesAccessibilityRange = false
         selectionIsKnown = false
         selectionRangeIsSettable = false
+        prefersUnicodeEvents = false
         frontmostPID = nil
         initialValue = nil
         isReady = false

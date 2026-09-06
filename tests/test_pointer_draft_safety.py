@@ -21,6 +21,8 @@ def main() -> int:
     assert "Some contenteditable AX implementations accept the range" in swift
     assert 'bundleIdentifier == "com.openai.codex"' in swift
     assert "private static func postUnicode(_ text: String) -> Bool" in swift
+    assert "prefersUnicodeEvents" in swift
+    assert 'readyState = "ready_unicode_codex"' in swift
     assert "setSelectedRange(ownedRange, on: target) && postUnicode(replacement)" in swift
     assert "unicode_fallback_draft_moved" in swift
     assert "maxDirectAccessibilityCommitUTF16 = 160" in swift
