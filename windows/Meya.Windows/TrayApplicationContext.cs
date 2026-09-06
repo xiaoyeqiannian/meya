@@ -11,7 +11,7 @@ namespace Meya.Windows;
 
 internal sealed class TrayApplicationContext
 {
-    private static readonly TimeSpan HoldThreshold = TimeSpan.FromMilliseconds(350);
+    private static readonly TimeSpan HoldThreshold = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan RecognitionTimeout = TimeSpan.FromSeconds(60);
 
@@ -276,6 +276,8 @@ internal sealed class TrayApplicationContext
             _target = ForegroundTarget.Capture();
             _bestPartial = string.Empty;
             _lastPreviewRevision = 0;
+            bool previewExpected = _previewWorker is { IsReady: true, SupportsNativeStreaming: true };
+            _overlay.ShowRecording(previewExpected);
 
             if (_previewWorker is { IsReady: true, SupportsNativeStreaming: true } previewWorker)
             {
@@ -372,6 +374,7 @@ internal sealed class TrayApplicationContext
         if (_state == SessionState.Arming)
         {
             Apply(SessionEvent.TriggerReleased);
+            _overlay.HideState();
             return;
         }
         if (_state is not (SessionState.Recording or SessionState.OverlayOnly))
@@ -389,6 +392,7 @@ internal sealed class TrayApplicationContext
         if (_state == SessionState.Arming)
         {
             Apply(SessionEvent.TriggerCancelled);
+            _overlay.HideState();
             return;
         }
         if (_state is SessionState.Recording or SessionState.OverlayOnly)

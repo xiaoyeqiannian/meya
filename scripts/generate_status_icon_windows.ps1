@@ -102,7 +102,7 @@ try {
         $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
         $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
 
-        $backgroundColor = [System.Drawing.Color]::FromArgb(255, 7, 31, 62)
+        $backgroundColor = [System.Drawing.Color]::FromArgb(255, 22, 72, 102)
         $backgroundInset = [single]($Size * 0.035)
         $backgroundRect = [System.Drawing.RectangleF]::new(
             $backgroundInset,
