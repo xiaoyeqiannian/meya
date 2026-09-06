@@ -27,7 +27,7 @@ public partial class App : Application
                 _overlay.NativeWindowReady += WindowsOverlayBehavior.Configure;
             }
 
-            string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.1.0";
+            string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.2.0";
             IReadOnlyList<MenuEntry> model = MeyaMenu.Create(
                 version,
                 "○ 麦芽正在加载识别模型…",
