@@ -1,8 +1,42 @@
-# 麦芽 Meya · Mac 本地语音输入法
+# 麦芽 Meya
 
-麦芽是面向 Apple Silicon 的**语音输入法**：键盘继续用系统拼音或 ABC，语音是另一种输入形式。二者并存，互不抢输入源，类似 iPhone 上语音与中文键盘可以切换、互不影响。
+<p align="center">
+  <img src="app/MeyaLogo.png" width="168" alt="麦芽 Meya logo" />
+</p>
 
-识别模型是可插拔的。实时识别和最终定稿可分别选择 MLX Whisper 或 FunASR Paraformer；推荐由 Paraformer Streaming 输出低延迟中文草稿，松开 Fn 后由 SeACo-Paraformer 结合个人词库重新定稿，再由 CT-Punc-C 补全标点。行业黑话、论文专名、代码标识符由个人词库提供。模型下载后可以完全断网运行。
+<p align="center"><strong>本地优先、可插拔模型、支持 macOS 与 Windows 的语音输入</strong></p>
+
+<p align="center">
+  <a href="https://github.com/xiaoyeqiannian/meya/releases/tag/v0.2"><img src="https://img.shields.io/github/v/release/xiaoyeqiannian/meya?display_name=tag&label=latest%20release" alt="Latest release" /></a>
+  <a href="https://github.com/xiaoyeqiannian/meya/releases/tag/v0.2"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-1f6feb" alt="macOS and Windows" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2ea44f" alt="MIT License" /></a>
+</p>
+
+麦芽是本地运行的语音输入系统：键盘输入仍由系统拼音或 ABC 负责，语音是另一种输入形式，二者并存、不抢输入源。识别模型、个人词库和学习数据都可以留在本机，模型下载完成后支持完全断网运行。
+
+## 当前 release：v0.2.0
+
+v0.2 是麦芽首个同时发布 macOS 和 Windows 发行包的版本，重点完成了跨平台架构、统一 IPC v2 协议、可插拔识别 worker，以及针对 Codex/Electron 输入框的实时草稿与最终提交兼容性修复。
+
+| 平台 | 下载 | 当前能力 |
+| --- | --- | --- |
+| macOS Apple Silicon | [下载 `.pkg`](https://github.com/xiaoyeqiannian/meya/releases/download/v0.2/Meya-v0.2.0-macos-arm64.pkg) | 长按 `Fn` 录音；实时草稿和最终文字写入当前输入框 |
+| Windows x64 | [下载 `.zip`](https://github.com/xiaoyeqiannian/meya/releases/download/v0.2/Meya-v0.2.0-windows-x64.zip) | 长按右 `Ctrl`；Paraformer 流式浮窗预览，松开后最终提交（预览版） |
+
+完整变更与已知限制见 [v0.2.0 Release Notes](RELEASE_NOTES_v0.2.0.md)，发行包校验值见 [GitHub Release](https://github.com/xiaoyeqiannian/meya/releases/tag/v0.2) 中的 `SHA256SUMS.txt`。
+
+## 多系统架构
+
+麦芽采用“共享核心、平台原生宿主”的架构，不用一个跨平台 UI 框架替代系统输入法层：
+
+- **共享层**：.NET Core/UI、IPC v2 二进制帧协议、会话状态机、模型能力协商、词库/学习数据和契约测试。
+- **macOS 宿主**：Swift + InputMethodKit、Fn 全局监听、AVAudioEngine、AX/Unicode 文本提交和多屏浮窗定位。
+- **Windows 宿主**：.NET 8 + Avalonia、WASAPI、全局右 Ctrl、Windows 浮窗和 UIA/SendInput 文本提交适配器。
+- **识别层**：实时识别与最终定稿独立选择，可接入 Paraformer、Whisper 等不同 worker；平台只负责音频、触发和文本目标，不绑定某个模型。
+
+这意味着同一套模型管理、词库和学习逻辑可以跨平台复用，同时保留 macOS 输入法和 Windows 输入系统各自需要的原生能力。
+
+识别模型是可插拔的。推荐由 Paraformer Streaming 输出低延迟中文草稿，松开触发键后由最终 worker 结合个人词库重新定稿，再补全标点。行业黑话、论文专名和代码标识符由个人词库提供。
 
 ## 安装
 
