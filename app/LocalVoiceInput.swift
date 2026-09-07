@@ -3356,8 +3356,14 @@ private final class LiveDraftInserter {
         with replacement: String,
         finish: Bool
     ) -> Bool {
-        guard frontmostApplicationIsUnchanged(),
-              refreshLiveTarget() != nil else {
+        // The keyboard fallback validates its target through the branch-local
+        // checks below (targetStillFocused/ownsCurrentDraft for the settable
+        // path, keyboardTargetIsSafe for the type-over path). Do NOT also gate
+        // on refreshLiveTarget() here: it reads the system-wide AXFocusedUIElement,
+        // which an Electron/web editor (Kiro, Codex, browsers) transiently
+        // reports as nil or as a re-rendered node during a live update. Gating
+        // the whole path on it dropped every partial and killed realtime input.
+        guard frontmostApplicationIsUnchanged() else {
             writeDiagnostic(state: "unicode_fallback_lost_focus")
             return false
         }
