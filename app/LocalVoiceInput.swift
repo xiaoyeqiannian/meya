@@ -845,6 +845,7 @@ private final class OverlayController {
     private var meterHeightConstraint: NSLayoutConstraint!
     private var hasPositionedPanel = false
     private var placementScreen: NSScreen?
+    private var pendingHide: DispatchWorkItem?
 
     init() {
         panel = NSPanel(
@@ -919,6 +920,7 @@ private final class OverlayController {
     }
 
     func show(status: String, text: String) {
+        cancelScheduledHide()
         beginPlacementSession()
         setMeterMode(.hidden)
         (panel.contentView as? DraggableContainerView)?.showsBackdrop = true
@@ -929,6 +931,7 @@ private final class OverlayController {
     }
 
     func showRecording() {
+        cancelScheduledHide()
         beginPlacementSession()
         setMeterMode(.levels)
         (panel.contentView as? DraggableContainerView)?.showsBackdrop = false
@@ -940,6 +943,7 @@ private final class OverlayController {
     }
 
     func showRecognizing() {
+        cancelScheduledHide()
         setMeterMode(.progress)
         (panel.contentView as? DraggableContainerView)?.showsBackdrop = false
         statusLabel.stringValue = "识别中…"
@@ -949,6 +953,7 @@ private final class OverlayController {
     }
 
     func showResult() {
+        cancelScheduledHide()
         setMeterMode(.complete)
         (panel.contentView as? DraggableContainerView)?.showsBackdrop = false
         statusLabel.stringValue = "完成"
@@ -967,10 +972,28 @@ private final class OverlayController {
     }
 
     func hide() {
+        cancelScheduledHide()
         meterView.stopAnimation()
         panel.orderOut(nil)
         hasPositionedPanel = false
         placementScreen = nil
+    }
+
+    /// Hide only after the current recognition session has reached a terminal
+    /// state.  A delayed hide from the previous utterance must never be able
+    /// to remove the overlay while a new utterance is finalizing.
+    func hide(after delay: TimeInterval) {
+        cancelScheduledHide()
+        let work = DispatchWorkItem { [weak self] in
+            self?.hide()
+        }
+        pendingHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func cancelScheduledHide() {
+        pendingHide?.cancel()
+        pendingHide = nil
     }
 
     private enum MeterMode {
@@ -4479,6 +4502,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         isRecording = false
         isFinalizing = true
+        // Once Fn is released we stop chasing the live draft: rotate the session
+        // so any in-flight or queued preview partial is dropped by
+        // applyPartialResult's session guard, and clear the pending-partial
+        // flags. Whatever the streaming draft had NOT yet typed is abandoned —
+        // the final decode below overwrites the whole utterance in one commit,
+        // so late partials must never race ahead of or trail after it.
+        activeSession = UUID()
+        partialInFlight = false
+        partialQueued = false
         setStatusIcon(description: "麦芽 Meya 正在整理文字")
         overlay.showRecognizing()
 
@@ -4581,7 +4613,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             return
         }
 
-        overlay.showResult()
+        overlay.showRecognizing()
         // Capture the observation before any final insertion path can reset the
         // live-draft state. This also covers InputMethodKit and clipboard/event
         // fallbacks used by Electron and web-based editors.
@@ -4594,6 +4626,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             inserted = true
         } else {
             inserted = TextInserter.insert(finalText)
+        }
+        // Only mark the overlay "完成" once the final text has actually been
+        // committed to the editor (or fallback). Showing it before commit made
+        // the panel report done while the text had not yet landed.
+        if inserted {
+            overlay.showResult()
         }
         if let response, let audioURL {
             liveDraftInserter.attachRecognition(
@@ -4613,9 +4651,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if !inserted {
             overlay.update(status: "已复制到剪贴板；请允许辅助功能后粘贴")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + (inserted ? 0.8 : 5.0)) { [weak self] in
-            self?.overlay.hide()
-        }
+        overlay.hide(after: inserted ? 0.8 : 5.0)
     }
 
     @discardableResult
