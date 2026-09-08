@@ -14,6 +14,21 @@ private func markAsMeyaInjected(_ event: CGEvent?) {
     event?.setIntegerValueField(.eventSourceUserData, value: meyaInjectedEventTag)
 }
 
+/// Electron/contenteditable hosts that expose a settable AXSelectedText but
+/// silently discard the mutation during a React re-render, so an AX-range
+/// write reports success while nothing lands. These hosts only accept trusted
+/// Unicode keyboard events, so Meya must take the keyboard path from the start
+/// (both for the live draft and the final commit) instead of the AX-range path.
+private let unicodeEventHostBundleIDs: Set<String> = [
+    "com.openai.codex",
+    "com.amazon.kiro.crew",
+]
+
+private func hostPrefersUnicodeEvents(_ bundleID: String?) -> Bool {
+    guard let bundleID else { return false }
+    return unicodeEventHostBundleIDs.contains(bundleID)
+}
+
 private extension Data {
     mutating func appendLittleEndian<T: FixedWidthInteger>(_ value: T) {
         var littleEndian = value.littleEndian
@@ -2846,11 +2861,11 @@ private enum TextInserter {
             return false
         }
 
-        // Codex can report a successful AXSelectedText write while its
-        // contenteditable composer discards the mutation during a React
-        // render. Prefer the keyboard path for this host so a success code
-        // cannot hide a no-op insertion.
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
+        // Electron contenteditable hosts (Codex, KiroCrew) can report a
+        // successful AXSelectedText write while the composer discards the
+        // mutation during a React render. Prefer the keyboard path for these
+        // hosts so a success code cannot hide a no-op insertion.
+        if hostPrefersUnicodeEvents(NSWorkspace.shared.frontmostApplication?.bundleIdentifier),
            postUnicode(text) {
             return true
         }
@@ -2858,11 +2873,11 @@ private enum TextInserter {
             return true
         }
 
-        // Codex is an Electron editor whose AXSelectedText setter can be
-        // exposed but reject writes while the composer is re-rendering. Its
-        // focused editor still accepts trusted Unicode keyboard events, so
-        // use that targeted fallback before the clipboard path.
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
+        // Same Electron hosts: the AXSelectedText setter can be exposed but
+        // reject writes while the composer is re-rendering. The focused editor
+        // still accepts trusted Unicode keyboard events, so use that targeted
+        // fallback before the clipboard path.
+        if hostPrefersUnicodeEvents(NSWorkspace.shared.frontmostApplication?.bundleIdentifier),
            postUnicode(text) {
             return true
         }
@@ -3062,7 +3077,7 @@ private final class LiveDraftInserter {
             return
         }
         frontmostPID = application.processIdentifier
-        prefersUnicodeEvents = application.bundleIdentifier == "com.openai.codex"
+        prefersUnicodeEvents = hostPrefersUnicodeEvents(application.bundleIdentifier)
 
         let focused = focusedElement()
         if let focused, isSecureField(focused) {
