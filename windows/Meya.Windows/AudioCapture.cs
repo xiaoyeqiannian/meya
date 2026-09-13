@@ -6,6 +6,13 @@ namespace Meya.Windows;
 
 internal sealed record CapturedAudio(string Path, TimeSpan Duration, byte[] FinalPcm16);
 
+internal sealed class AudioInputUnavailableException : InvalidOperationException
+{
+    internal AudioInputUnavailableException(string message) : base(message)
+    {
+    }
+}
+
 internal sealed class AudioCapture : IAsyncDisposable
 {
     private readonly object _sync = new();
@@ -140,7 +147,7 @@ internal sealed class AudioCapture : IAsyncDisposable
             RuntimeLog.Write($"Audio default capture missing roles=[{string.Join(',', failures)}]; fallback={device.FriendlyName}");
             return device;
         }
-        throw new InvalidOperationException(
+        throw new AudioInputUnavailableException(
             "Windows 没有可用的录音输入端点。请在 设置 → 系统 → 声音 → 输入 中启用并选择麦克风。");
     }
 

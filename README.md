@@ -263,7 +263,7 @@ export HF_HUB_CACHE="$HF_HOME/hub"
 
 Windows 客户端基于 .NET 8 WinForms、WASAPI 和与 macOS 共用的 IPC v2 二进制帧协议。
 短按右 `Ctrl` 不会开始录音；按住约 250 ms 后开始，Paraformer Streaming 的实时结果会动态显示在不可激活、鼠标穿透的浮层中，但不会写入输入框；松开后由 SeACo 最终定稿并一次性写入原输入框。
-若录音期间前台窗口变化，结果只复制到剪贴板，避免写入错误窗口。
+若录音期间前台窗口变化，结果只复制到剪贴板，避免写入错误窗口。若 Windows 没有可用的录音输入端点，浮层会显示“未检测到麦克风”提示约 4 秒，而不是立即消失。
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass

@@ -14,6 +14,7 @@ internal sealed class TrayApplicationContext
     private static readonly TimeSpan HoldThreshold = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan RecognitionTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan InputErrorDisplayDuration = TimeSpan.FromSeconds(4);
 
     private readonly SynchronizationContext _ui;
     private readonly IClassicDesktopStyleApplicationLifetime _desktop;
@@ -38,6 +39,7 @@ internal sealed class TrayApplicationContext
     private SessionState _state = SessionState.Idle;
     private string _bestPartial = string.Empty;
     private int _lastPreviewRevision;
+    private int _overlayNoticeRevision;
     private bool _exiting;
     private bool _restarting;
     private bool _previewRestarting;
@@ -257,6 +259,7 @@ internal sealed class TrayApplicationContext
             ShowError("最终模型尚未就绪", "请等待模型加载完成后再试");
             return;
         }
+        Interlocked.Increment(ref _overlayNoticeRevision);
         Apply(SessionEvent.TriggerPressed);
         _holdTimer.Start();
     }
@@ -319,11 +322,32 @@ internal sealed class TrayApplicationContext
             Apply(SessionEvent.HoldElapsed);
             _overlay.ShowRecording(preview is not null);
         }
+        catch (AudioInputUnavailableException exception)
+        {
+            RuntimeLog.Write($"Audio input unavailable session={_session}: {exception.Message}");
+            await CancelSessionAsync();
+            await ShowTransientOverlayAsync(
+                "未检测到麦克风 · 请连接或启用输入设备",
+                InputErrorDisplayDuration);
+        }
         catch (Exception exception)
         {
             RuntimeLog.Write($"Audio start failed session={_session}: {exception}");
             ShowError("无法开始录音", exception.Message);
             await CancelSessionAsync();
+        }
+    }
+
+    private async Task ShowTransientOverlayAsync(string text, TimeSpan duration)
+    {
+        int revision = Interlocked.Increment(ref _overlayNoticeRevision);
+        _overlay.ShowState(text);
+        await Task.Delay(duration);
+        if (!_exiting &&
+            revision == Volatile.Read(ref _overlayNoticeRevision) &&
+            _state == SessionState.Idle)
+        {
+            _overlay.HideState();
         }
     }
 
