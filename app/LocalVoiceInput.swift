@@ -3407,7 +3407,13 @@ private final class LiveDraftInserter {
         }
 
         let replaced: Bool
-        if selectionIsKnown, selectionRangeIsSettable, let target {
+        if prefersUnicodeEvents {
+            guard prepareCodexKeyboardTarget() else {
+                writeDiagnostic(state: "unicode_fallback_draft_moved")
+                return false
+            }
+            replaced = postBackspaces(lastDraft.count) && postUnicode(replacement)
+        } else if selectionIsKnown, selectionRangeIsSettable, let target {
             // Pointer clicks can move the caret while a live hypothesis is on
             // screen. Select and verify the exact range Meya owns, then type
             // over that selection in one operation. This cannot backspace at
@@ -3430,11 +3436,58 @@ private final class LiveDraftInserter {
         }
         ownedRange.length = replacement.utf16.count
         lastDraft = replacement
+
+        // Codex's Electron composer can leave the AX selection highlighted
+        // after it consumes the synthetic Unicode events. Collapse the
+        // selection immediately, then repeat on the next run-loop turn after
+        // the composer has had a chance to apply the replacement. The async
+        // pass is guarded so an older live hypothesis cannot move a newer
+        // caret or touch a different foreground application.
+        let caret = CFRange(
+            location: ownedRange.location + ownedRange.length,
+            length: 0
+        )
+        if prefersUnicodeEvents, let target {
+            _ = setSelectedRange(caret, on: target)
+            let expectedDraft = replacement
+            let expectedPID = frontmostPID
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.lastDraft == expectedDraft,
+                      self.target.map({ CFEqual($0, target) }) == true,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == expectedPID
+                else { return }
+                _ = self.setSelectedRange(caret, on: target)
+            }
+        }
         writeDiagnostic(state: finish ? "committed_unicode_fallback" : "updated_unicode_fallback")
         if finish {
             reset()
         }
         return true
+    }
+
+    private func prepareCodexKeyboardTarget() -> Bool {
+        guard frontmostApplicationIsUnchanged() else { return false }
+        if let target, let focused = focusedElement(), !CFEqual(focused, target) {
+            return false
+        }
+        guard selectionIsKnown, !lastDraft.isEmpty, let element = target else { return true }
+        guard let selection = selectedRange(of: element) else { return false }
+
+        let expectedCaret = originalRange.location + lastDraft.utf16.count
+        if selection.length == 0 && selection.location == expectedCaret {
+            return true
+        }
+
+        // Codex may keep Meya's previous draft selected after an Electron
+        // re-render. Collapse that selection with a native right-arrow event
+        // instead of writing AXSelectedTextRange again, which recreates the
+        // blue highlight and can leave the editor stuck in that state.
+        guard selection.location == ownedRange.location,
+              selection.length == ownedRange.length
+        else { return false }
+        return postArrowRight()
     }
 
     private func keyboardTargetIsSafe() -> Bool {
@@ -3473,6 +3526,18 @@ private final class LiveDraftInserter {
             keyDown.post(tap: .cghidEventTap)
             keyUp.post(tap: .cghidEventTap)
         }
+        return true
+    }
+
+    private func postArrowRight() -> Bool {
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 124, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 124, keyDown: false)
+        else { return false }
+        markAsMeyaInjected(keyDown)
+        markAsMeyaInjected(keyUp)
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
         return true
     }
 
@@ -3854,6 +3919,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var committedText = ""
     private var committedEnd = 0.0
     private var lastHypothesis = ""
+    // Avoid re-writing the same live hypothesis while the speaker is paused.
+    // Replacing the draft and refreshing the overlay can make unchanged text
+    // appear to blink even though recognition produced no new content.
+    private var lastAppliedPreview = ""
     private var recordingContextText = ""
     private var recordingAppName = ""
     private var recordingAppBundle = ""
@@ -4361,6 +4430,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         draftRevision = 0
         partialQueued = false
         partialInFlight = false
+        lastAppliedPreview = ""
     }
 
     private func requestMicrophoneAndStart() {
@@ -4487,6 +4557,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             lastHypothesis = response.lastHypothesis ?? lastHypothesis
             let preview = response.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !preview.isEmpty else { return }
+            guard preview != lastAppliedPreview else { return }
+            lastAppliedPreview = preview
             if Date() < liveDraftPointerPauseUntil {
                 overlay.update(status: "输入中 · 松开 Fn 定稿")
                 return
