@@ -2352,17 +2352,26 @@ private final class ASRService {
 
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
             self?.queue.async { self?.consumeOutput(data) }
         }
         errorPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if !data.isEmpty, let message = String(data: data, encoding: .utf8) {
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            if let message = String(data: data, encoding: .utf8) {
                 NSLog("ASR: %@", message.trimmingCharacters(in: .whitespacesAndNewlines))
             }
         }
         process.terminationHandler = { [weak self] process in
             guard let self else { return }
+            self.outputPipe.fileHandleForReading.readabilityHandler = nil
+            self.errorPipe.fileHandleForReading.readabilityHandler = nil
             self.failPending(NSError(
                 domain: "LocalVoiceInput.ASR",
                 code: 3,
@@ -5053,16 +5062,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         asrReady = false
         finalModelReady = false
         previewNativeStreaming = false
-        separateFinalModelRequired = selection.preview != selection.final
+        // Keep one resident worker. Preview and final use the same loaded model.
+        separateFinalModelRequired = false
         previewModelName = ""
         finalModelName = selection.final
         refreshModelStatus()
         setStatusIcon(description: "麦芽 Meya 正在加载模型")
 
         startWorker(role: "preview", model: selection.preview)
-        if selection.preview != selection.final {
-            startWorker(role: "final", model: selection.final)
-        }
     }
 
     private func startWorker(role: String, model: String) {

@@ -2,3 +2,4 @@ mlx-whisper==0.4.3
 mlx-audio==0.5.0
 funasr==1.4.1
 torchaudio==2.11.0
+funasr-onnx==0.4.11

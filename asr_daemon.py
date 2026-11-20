@@ -13,6 +13,11 @@ from uuid import UUID
 
 import numpy as np
 
+try:
+    import resource
+except ImportError:  # Windows has no resource module.
+    resource = None
+
 
 PROJECT_DIR = Path(__file__).resolve().parent
 MODEL_NAME = os.environ.get("LOCAL_VOICE_MODEL", "mlx-community/whisper-large-v3-turbo")
@@ -26,6 +31,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from asr_adapters import (  # noqa: E402
+    OnnxParaformerAdapter,
     ParaformerAdapter,
     QwenAdapter,
     resolve_catalog_adapter,
@@ -74,12 +80,42 @@ from transcribe import (  # noqa: E402
 MODEL_SOURCE: str | None = None
 MODEL_BACKEND, MODEL_BACKEND_NAME = split_model_identifier(MODEL_NAME)
 PARAFORMER_ADAPTER: ParaformerAdapter | None = None
+ONNX_ADAPTER: OnnxParaformerAdapter | None = None
 QWEN_ADAPTER: QwenAdapter | None = None
 HOTWORD_CATALOG_REPORT = PROJECT_DIR / "runtime" / "hotword-catalog-report.json"
 LEARNING_STORE: FeedbackStore | None = None
 STREAM_SESSION_ID: str | None = None
 STREAM_PROCESSED_SAMPLES = 0
 STREAM_REVISION = 0
+PROCESS_STARTED = time.perf_counter()
+
+def memory_mb() -> float:
+    if resource is not None:
+        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # macOS reports bytes, while Linux reports KiB.
+        return value / (1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0)
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(counters)
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+        return counters.WorkingSetSize / 1024.0 / 1024.0
+    except Exception:
+        return 0.0
+
+def metric_log(event: str, **fields: object) -> None:
+    payload = {"event": event, "peak_rss_mb": round(memory_mb(), 1), **fields}
+    print("[meya-metrics] " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")), file=sys.stderr, flush=True)
 def emit(payload: dict, *, session: UUID = ZERO_SESSION, sequence: int = 0) -> None:
     kind = FrameType.ERROR if payload.get("error") or payload.get("event") == "fatal" else FrameType.EVENT
     write_frame(sys.stdout.buffer, json_frame(kind, payload, session=session, sequence=sequence))
@@ -408,11 +444,14 @@ def transcribe_request(request: dict) -> dict:
     final = bool(request.get("final", False))
     audio_path = Path(str(request["audio_path"]))
     started = time.perf_counter()
+    metric_log("recognition_start", request_id=request_id, final=final)
 
     audio, duration = load_wav(audio_path)
     rms = float(np.sqrt(np.mean(np.square(audio), dtype=np.float64))) if len(audio) else 0.0
     peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
     if rms < 0.008 and peak < 0.05:
+        elapsed = time.perf_counter() - started
+        metric_log("recognition_end", request_id=request_id, final=final, duration=duration, elapsed=round(elapsed, 4), silence=True)
         return {
             "id": request_id,
             "final": final,
@@ -431,7 +470,11 @@ def transcribe_request(request: dict) -> dict:
     selection = dynamic_selection(request, glossary, requested_hotword_limit(request))
     active_entries = list(selection.entries)
     hotwords_used: list[str] = []
-    if MODEL_BACKEND == "paraformer":
+    if MODEL_BACKEND == "onnx":
+        if ONNX_ADAPTER is None:
+            raise RuntimeError("ONNX 模型尚未加载")
+        result = ONNX_ADAPTER.transcribe(audio)
+    elif MODEL_BACKEND == "paraformer":
         if PARAFORMER_ADAPTER is None:
             raise RuntimeError("Paraformer 模型尚未加载")
         if final and not bool(request.get("disable_hotwords", False)):
@@ -535,13 +578,15 @@ def transcribe_request(request: dict) -> dict:
     if final and changes:
         learning_store().record_rule_hits(changes)
     client_text = text if final or SAFE_LIVE_DRAFT else ""
+    elapsed = time.perf_counter() - started
+    metric_log("recognition_end", request_id=request_id, final=final, duration=duration, elapsed=round(elapsed, 4))
     return {
         "id": request_id,
         "final": final,
         "text": client_text,
         "raw_text": raw_text,
         "duration": duration,
-        "elapsed": time.perf_counter() - started,
+        "elapsed": elapsed,
         "silence": False,
         "model": MODEL_NAME,
         "language": detected_language,
@@ -649,13 +694,15 @@ def stream_chunk_request(request: dict) -> dict:
     else:
         text, changes = apply_corrections(normalized_text, user_file("corrections.tsv"))
     client_text = text if SAFE_LIVE_DRAFT else ""
+    elapsed = time.perf_counter() - started
+    metric_log("stream_chunk_end", request_id=request_id, revision=STREAM_REVISION, duration=utterance_duration, elapsed=round(elapsed, 4))
     return {
         "id": request_id,
         "final": False,
         "text": client_text,
         "raw_text": raw_text,
         "duration": utterance_duration,
-        "elapsed": time.perf_counter() - started,
+        "elapsed": elapsed,
         "silence": not bool(raw_text),
         "model": MODEL_NAME,
         "language": "zh",
@@ -786,7 +833,7 @@ def serve_framed_stdio() -> int:
 
 
 def main() -> int:
-    global MODEL_SOURCE, PARAFORMER_ADAPTER, QWEN_ADAPTER
+    global MODEL_SOURCE, PARAFORMER_ADAPTER, ONNX_ADAPTER, QWEN_ADAPTER
     if "--refresh-catalog-only" in sys.argv[1:]:
         try:
             result = refresh_hotword_catalog()
@@ -796,7 +843,11 @@ def main() -> int:
             emit({"event": "fatal", "error": str(exc)})
             return 1
     try:
-        if MODEL_BACKEND == "paraformer":
+        if MODEL_BACKEND == "onnx":
+            ONNX_ADAPTER = OnnxParaformerAdapter(PROJECT_DIR, MODEL_BACKEND_NAME, role=MODEL_ROLE)
+            ONNX_ADAPTER.load()
+            ONNX_ADAPTER.warmup()
+        elif MODEL_BACKEND == "paraformer":
             PARAFORMER_ADAPTER = ParaformerAdapter(PROJECT_DIR, MODEL_BACKEND_NAME, role=MODEL_ROLE)
             PARAFORMER_ADAPTER.load()
             PARAFORMER_ADAPTER.warmup()
@@ -816,6 +867,7 @@ def main() -> int:
         ):
             refresh_hotword_catalog()
         capabilities = worker_capabilities()
+        metric_log("worker_ready", startup_elapsed=round(time.perf_counter() - PROCESS_STARTED, 3), model=MODEL_NAME, role=MODEL_ROLE)
         emit({
             "event": "ready",
             "model": MODEL_NAME,
