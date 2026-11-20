@@ -148,7 +148,10 @@ internal sealed class TrayApplicationContext
 
     private async Task StartWorkersAsync()
     {
-        await Task.WhenAll(StartFinalWorkerAsync(), StartPreviewWorkerAsync()).ConfigureAwait(true);
+        // Keep one resident Python worker. It serves both preview and final requests.
+        await StartPreviewWorkerAsync().ConfigureAwait(true);
+        _worker = _previewWorker;
+        UpdateReadyStatus();
     }
 
     private async Task StartFinalWorkerAsync()
@@ -640,29 +643,10 @@ internal sealed class TrayApplicationContext
 
     private async Task RestartWorkerAsync()
     {
-        if (_restarting || _exiting)
-        {
-            return;
-        }
-        _restarting = true;
-        try
-        {
-            AsrWorker? old = _worker;
-            _worker = null;
-            if (old is not null)
-            {
-                old.Fatal -= OnWorkerFatal;
-                await old.DisposeAsync();
-            }
-            _statusItem.Header = "○ 正在重启最终识别模型…";
-            _notifyIcon.ToolTipText = "麦芽 Meya 正在重启最终模型";
-            _overlay.ShowState("正在重启最终识别模型…");
-            await StartFinalWorkerAsync();
-        }
-        finally
-        {
-            _restarting = false;
-        }
+        // Final requests share the preview worker in single-worker mode.
+        await RestartPreviewWorkerAsync().ConfigureAwait(true);
+        _worker = _previewWorker;
+        UpdateReadyStatus();
     }
 
     private async Task RestartPreviewWorkerAsync()
@@ -892,7 +876,9 @@ internal sealed class TrayApplicationContext
     {
         _models = new ModelSelection(preview.Trim(), final.Trim());
         _models.Save(_userDataDirectory);
-        await Task.WhenAll(RestartWorkerAsync(), RestartPreviewWorkerAsync());
+        await RestartPreviewWorkerAsync();
+        _worker = _previewWorker;
+        UpdateReadyStatus();
     }
 
     private void ShowDiagnostics()

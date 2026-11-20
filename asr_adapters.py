@@ -15,6 +15,7 @@ from seaco_hotwords import compile_glossary, write_compilation_report
 
 
 PARAFORMER_PREFIX = "paraformer:"
+ONNX_PREFIX = "onnx:"
 QWEN_PREFIX = "qwen:"
 DEFAULT_PARAFORMER_MODEL = "funasr/paraformer-zh"
 DEFAULT_SEACO_MODEL = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
@@ -66,6 +67,11 @@ def split_model_identifier(identifier: str) -> tuple[str, str]:
         if not model:
             raise ValueError("Paraformer 模型标识不能为空")
         return "paraformer", model
+    if value.lower().startswith(ONNX_PREFIX):
+        model = value[len(ONNX_PREFIX) :].strip()
+        if not model:
+            raise ValueError("ONNX 模型标识不能为空")
+        return "onnx", model
     if value.lower().startswith(QWEN_PREFIX):
         model = value[len(QWEN_PREFIX) :].strip()
         if not model:
@@ -80,6 +86,41 @@ def split_model_identifier(identifier: str) -> tuple[str, str]:
 
 def paraformer_identifier(model: str) -> str:
     return PARAFORMER_PREFIX + model
+
+
+class OnnxParaformerAdapter:
+    backend = "onnx"
+
+    def __init__(self, project_dir: Path, model: str, role: str = "preview") -> None:
+        self.identifier = ONNX_PREFIX + model
+        self.source = (project_dir / model).resolve() if not Path(model).is_absolute() else Path(model)
+        self.role = role
+        self.model: Any | None = None
+
+    def load(self) -> None:
+        from funasr_onnx import Paraformer
+        if not self.source.exists():
+            raise FileNotFoundError(f"ONNX 模型目录不存在：{self.source}")
+        self.model = Paraformer(str(self.source), quantize=True, intra_op_num_threads=4)
+
+    def warmup(self) -> None:
+        if self.model is None:
+            raise RuntimeError("ONNX 模型尚未加载")
+
+    @property
+    def is_streaming(self) -> bool:
+        return False
+
+    def transcribe(self, audio: np.ndarray, **_: Any) -> dict[str, Any]:
+        if self.model is None:
+            raise RuntimeError("ONNX 模型尚未加载")
+        result = self.model(audio)
+        item = result[0] if result else {}
+        prediction = item.get("preds") or ""
+        if isinstance(prediction, tuple):
+            prediction = prediction[0]
+        text = str(prediction).strip()
+        return {"text": text, "language": "zh", "segments": [], "timestamp": [], "streaming": False}
 
 
 def qwen_identifier(model: str) -> str:
