@@ -82,18 +82,21 @@ codesign_keychain=()
 certificate_keychain=()
 codesign_identity=""
 if [[ -f "$local_signing_keychain_v2" ]]; then
-  security unlock-keychain -p '' "$local_signing_keychain_v2"
-  codesign_identity="$(security find-identity -v -p codesigning "$local_signing_keychain_v2" | awk '/Meya Local Code Signing V2/{print $2; exit}')"
-  if [[ -n "$codesign_identity" ]]; then
-    codesign_keychain=(--keychain "$local_signing_keychain_v2")
-    certificate_keychain=("$local_signing_keychain_v2")
+  if security unlock-keychain -p '' "$local_signing_keychain_v2" 2>/dev/null; then
+    codesign_identity="$(security find-identity -v -p codesigning "$local_signing_keychain_v2" 2>/dev/null | awk '/Meya Local Code Signing V2/{print $2; exit}')"
+    if [[ -n "$codesign_identity" ]]; then
+      codesign_keychain=(--keychain "$local_signing_keychain_v2")
+      certificate_keychain=("$local_signing_keychain_v2")
+    fi
+  else
+    echo "MeyaSigningV2 钥匙串不可用，改用临时签名。" >&2
   fi
 fi
 if [[ -z "$codesign_identity" ]]; then
-  codesign_identity="$(security find-identity -v -p codesigning | awk '/Apple Development/{print $2; exit}')"
+  codesign_identity="$(security find-identity -v -p codesigning 2>/dev/null | awk '/Apple Development/{print $2; exit}')"
 fi
 if [[ -z "$codesign_identity" && -f "$legacy_signing_keychain" ]]; then
-  codesign_identity="$(security find-identity -v -p codesigning "$legacy_signing_keychain" | awk '/Meya Local Code Signing/{print $2; exit}')"
+  codesign_identity="$(security find-identity -v -p codesigning "$legacy_signing_keychain" 2>/dev/null | awk '/Meya Local Code Signing/{print $2; exit}')"
   if [[ -n "$codesign_identity" ]]; then
     codesign_keychain=(--keychain "$legacy_signing_keychain")
     certificate_keychain=("$legacy_signing_keychain")

@@ -3045,6 +3045,23 @@ private final class LiveDraftInserter {
     private static let maxDirectAccessibilityCommitUTF16 = 160
     private static let unicodeEventChunkLength = 20
 
+    // WebKit/Blink/Gecko contenteditable controls can report a successful
+    // AXSelectedText write while dropping the mutation during a DOM render.
+    // Unicode keyboard events are delivered through the browser's normal
+    // editing path and remain safe because every update validates the captured
+    // frontmost application and owned range first.
+    private static let unicodeEventApplications: Set<String> = [
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "com.google.Chrome.canary",
+        "com.microsoft.edgemac",
+        "org.mozilla.firefox",
+        "company.thebrowser.Browser",
+        "com.brave.Browser",
+        "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera"
+    ]
+
     private var target: AXUIElement?
     private var originalRange = CFRange(location: 0, length: 0)
     private var originalText = ""
@@ -3071,7 +3088,9 @@ private final class LiveDraftInserter {
             return
         }
         frontmostPID = application.processIdentifier
-        prefersUnicodeEvents = application.bundleIdentifier == "com.openai.codex"
+        prefersUnicodeEvents = application.bundleIdentifier.map {
+            $0 == "com.openai.codex" || Self.unicodeEventApplications.contains($0)
+        } ?? false
 
         let focused = focusedElement()
         if let focused, isSecureField(focused) {
@@ -3861,6 +3880,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var separateFinalModelRequired = false
     private var previewModelName = ""
     private var finalModelName = ""
+    private var lastPermissionErrorAt: Date?
     private var activeSession = UUID()
     private static let functionHardwareKeyCode: Int64 = 63
     private var functionKeyEventTap: CFMachPort?
@@ -4631,9 +4651,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if liveDraftInserter.commit(finalText) {
             inserted = true
         } else if let inputController = recordingInputController ?? activeInputController {
+            // A host editor can briefly reject the live replacement while it
+            // re-renders. Remove the draft first so the fallback final commit
+            // cannot leave the live hypothesis in front of the final text.
+            _ = liveDraftInserter.cancel()
             inputController.commitFinalText(finalText)
             inserted = true
         } else {
+            _ = liveDraftInserter.cancel()
             inserted = TextInserter.insert(finalText)
         }
         // Only mark the overlay "完成" once the final text has actually been
@@ -4890,6 +4915,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func showPermissionError(_ message: String) {
+        if let lastPermissionErrorAt,
+           Date().timeIntervalSince(lastPermissionErrorAt) < 8 {
+            return
+        }
+        self.lastPermissionErrorAt = Date()
         overlay.show(status: "需要系统权限", text: message)
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in self?.overlay.hide() }
     }
@@ -5062,14 +5092,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         asrReady = false
         finalModelReady = false
         previewNativeStreaming = false
-        // Keep one resident worker. Preview and final use the same loaded model.
-        separateFinalModelRequired = false
+        // Keep the native streaming preview and the punctuation-capable final
+        // worker independent. Their latency and decoding requirements differ.
+        separateFinalModelRequired = selection.preview != selection.final
         previewModelName = ""
         finalModelName = selection.final
         refreshModelStatus()
         setStatusIcon(description: "麦芽 Meya 正在加载模型")
 
         startWorker(role: "preview", model: selection.preview)
+        if selection.preview != selection.final {
+            startWorker(role: "final", model: selection.final)
+        }
     }
 
     private func startWorker(role: String, model: String) {
